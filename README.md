@@ -35,25 +35,78 @@ C:\Users\c\AppData\Local\Programs\Python\Python310\python.exe -m venv .venv
 > 같은 역할(GPU 병렬 RL)은 Isaac Lab이 대신합니다. Isaac Lab 3.0 / Isaac Sim 6.x는 Windows 11 이상만
 > 지원하므로 현재 설치된 Isaac Lab 2.3.2 / Isaac Sim 5.1을 그대로 씁니다.
 
-## 1-1. PICO 4 연결과 장비·트래커 감지
+## 1-1. PICO 4 / 4 Ultra 연결과 장비·트래커 감지
 
-**연결 방법 (XRoboToolkit)**
+**연결 구성 (XRoboToolkit)**
 
-1. PC: `XRoboToolkit-PC-Service` Windows 빌드를 받아 압축을 풉니다.
-   - `VC_redist.x64.exe`를 설치합니다.
-   - `install.bat`를 관리자 권한으로 실행합니다(방화벽 규칙 추가).
-   - `runService.bat`로 서비스를 실행합니다.
-2. 헤드셋: `XRoboToolkit-PICO-1.1.1-SDK29.apk`를 `adb install`로 설치합니다(PICO 4 / Android API 29용).
-   - 앱에서 PC IP를 입력합니다(헤드셋 → PC TCP 63901).
-   - 바디 트래킹을 쓰려면 Motion Tracker를 **Full body**로 설정합니다.
+```
+헤드셋 XRoboToolkit 앱 ──TCP 63901──> PC RoboticsServiceProcess.exe ──127.0.0.1:60061──> xrobotoolkit_sdk (01_probe / 02_record)
+```
+
+| 포트 (`setting.ini`) | 용도 |
+|---|---|
+| TCP 63901 | 헤드셋 → PC 데이터. 방화벽 인바운드 허용 필요 |
+| UDP 29888 | PC 브로드캐스트. 같은 서브넷일 때만 헤드셋에 서버 선택 팝업이 뜸 |
+| TCP 127.0.0.1:60061 | 서비스 ↔ Python SDK (로컬 전용) |
+
+**PC: XRoboToolkit-PC-Service**
+
+1. [Releases](https://github.com/XR-Robotics/XRoboToolkit-PC-Service/releases) v1.0.0의 `XRoboToolkit-PC-Service.win.zip`을 전용 폴더에 풉니다(zip 안에 상위 폴더가 없음).
+2. `VC_redist.x64.exe`를 설치합니다.
+   `0x80070666`(다른 버전이 이미 설치됨)이 나오면 더 새 VC++ 2015-2022 런타임이 있는 것이므로 건너뜁니다.
+3. 관리자 PowerShell에서 압축을 푼 폴더로 이동해 `install.bat`를 실행하고, 방화벽 규칙을 전체 경로로 다시 추가합니다.
+   - 탐색기에서 "관리자 권한으로 실행"하면 작업 폴더가 `C:\Windows\System32`가 되어 `setting.ini`·`db` 처리가 엉뚱한 곳에 적용됩니다.
+   - 스크립트의 `%CUR_DIR%`가 설정되지 않아 방화벽 규칙이 상대 경로로 등록됩니다.
+
+   ```powershell
+   cd <압축 푼 폴더>
+   .\install.bat
+   netsh advfirewall firewall add rule name="XRoboToolkit-PC-Service" dir=in action=allow program="<압축 푼 폴더>\RoboticsServiceProcess.exe" enable=yes profile=any
+   ```
+4. `runService.bat`로 서비스를 실행합니다(창 없이 백그라운드, 한 번에 하나만 실행).
+   - `netstat -ano | findstr "63901 60061"`에서 두 포트가 LISTENING이면 정상입니다.
+   - 서비스 로그는 `%LOCALAPPDATA%\PICOBusinessSuitData\log\<날짜>.txt`에 남습니다.
+     헤드셋 접속은 `new tcp connect device`, 끊김은 `remove tcp`로 기록됩니다.
+
+Qt는 설치하지 않아도 됩니다. 릴리스 zip에 Qt 런타임 DLL이 들어 있고, Qt 설치는 서비스를 소스에서 빌드할 때만 필요합니다.
+
+**헤드셋: XRoboToolkit 앱**
+
+1. 헤드셋에서 개발자 모드와 USB 디버깅을 켭니다(설정 → 일반 → 정보 → 소프트웨어 버전을 여러 번 탭).
+   PC에는 Android Platform-Tools(`adb`)를 설치하고 PATH에 추가합니다.
+2. 기종에 맞는 APK를 [Releases](https://github.com/XR-Robotics/XRoboToolkit-Unity-Client/releases) v1.1.1에서 받아 설치합니다.
+   기종은 `adb shell getprop ro.product.model`로 확인합니다.
+
+   | 기종 | Android | APK |
+   |---|---|---|
+   | PICO 4 | 10 (API 29) | `XRoboToolkit-PICO-1.1.1-SDK29.apk` (일반 빌드는 설치되지 않음) |
+   | PICO 4 Ultra (`A9210`) | 14 (API 34) | `XRoboToolkit-PICO-1.1.1.apk` (SDK29 빌드도 설치·스트리밍 확인) |
+
+   ```powershell
+   adb install -r -g XRoboToolkit-PICO-1.1.1.apk
+   ```
+3. 라이브러리 → 알 수 없는 출처에서 실행합니다.
+   처음 실행할 때는 헤드셋이 인터넷에 연결되어 있어야 합니다(없으면 "No entitlement info").
+4. **Network → Enter**에 PC IP를 입력하고 Status가 **WORKING**이 되는지 확인합니다.
+   PC와 헤드셋이 다른 서브넷이면 서버 선택 팝업이 뜨지 않으므로 직접 입력합니다. TCP 연결은 라우터를 넘어서도 됩니다.
+5. 트래킹 설정:
+   - Head, Controller를 켭니다.
+   - PICO Motion Tracker Mode: Full body(`body_*`) / Object(`sparse_trackers`) / None(`hmd_3pt`). Num은 착용한 트래커 수입니다.
    - **Send**를 켭니다.
-3. 모션 트래커 캘리브레이션: 헤드셋을 켤 때마다 PICO의 Motion Tracker 앱에서 다시 해야 합니다.
-4. 감지 실행:
+   - **Switch w/ A Button은 끕니다.** 켜 두면 A 버튼이 Send도 함께 토글합니다(`02_record.py`가 A를 녹화 시작/정지로 씀).
+6. 모션 트래커 캘리브레이션: 헤드셋을 켤 때마다 PICO의 Motion Tracker 앱에서 다시 해야 합니다.
+   - 캘리브레이션 없이 Full body를 고르면 바디 데이터가 나오지 않고, PC 연결이 끊긴 채 앱에는 WORKING이 그대로 표시될 수 있습니다.
+   - 이때 서비스 로그에는 `remove tcp`, 헤드셋 logcat에는 `mode is BodyTracking, but StateCode = 0`이 남습니다.
+   - 캘리브레이션을 마친 뒤 앱에서 **Reconnect**를 누릅니다.
+7. 감지 실행. 아래 명령은 PowerShell 기준이며, cmd에서는 `#` 이후 주석을 빼고 실행합니다.
 
 ```powershell
-.venv\Scripts\python scripts\01_probe_device.py                  # 실기
+.venv\Scripts\python scripts\01_probe_device.py --body-trackers 2     # 실기
 .venv\Scripts\python scripts\01_probe_device.py --simulate body_2trk   # 헤드셋 없이 시험
 ```
+
+`No packets received`가 나오면 다음 순서로 확인합니다.
+서비스 실행 → 앱 Status WORKING → Send 켜짐 → 방화벽 TCP 63901 → (Full body이면) 트래커 캘리브레이션.
 
 **감지 항목과 한계** (`igris_pipeline/pico/device_probe.py`)
 
@@ -83,6 +136,10 @@ PICO 바디 트래킹은 **보정된 트래커가 최소 2개** 있어야 동작
 ```powershell
 .venv\Scripts\python scripts\02_record.py --session s01 --subject-height 1.72   # 오른손 A: 시작/정지, B: 마커
 ```
+
+- A/B 버튼은 PC의 `02_record.py`가 읽습니다. 상태(`[rec] recording ...`, `[rec] saved ...`)는 PC 터미널에만 표시되고 헤드셋에는 표시되지 않습니다.
+- 앱의 Data Collection → **Record**는 헤드셋 내부(`/sdcard/Download/trackingData_*.txt`)에 따로 저장하는 기능이며 이 파이프라인에서는 쓰지 않습니다.
+  같은 Record 버튼을 다시 누르면 정지합니다.
 
 권장 프로토콜: 매 에피소드 시작 시 **3초간 정면 T-포즈로 정지**합니다(캘리브레이션 창).
 `hmd_3pt`와 `sparse_trackers`에는 키(`--subject-height`)가 꼭 필요합니다.
