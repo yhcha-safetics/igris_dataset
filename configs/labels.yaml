@@ -1,0 +1,99 @@
+# Posture / action labelling rules (stage 2).
+#
+# Labels are produced on three independent axes so combinations ("walk + wave_right",
+# "squat + reach_forward") do not need their own rules.
+#
+# Each condition is [feature, op, threshold, softness]:
+#   score = sigmoid((feature - threshold) / softness)   for ">"
+#   score = sigmoid((threshold - feature) / softness)   for "<"
+# A label's frame score is the minimum (fuzzy AND) of its conditions; the axis default
+# label gets the constant `default_score`. Scores are then smoothed with a Viterbi pass
+# (`switch_penalty`) and segments shorter than `min_duration` seconds are merged.
+# Feature definitions: igris_pipeline/labeling/features.py
+
+axes:
+  loco:
+    default: idle
+    default_score: 0.5
+    switch_penalty: 6.0
+    min_duration: 0.5
+    labels:
+      run:
+        - [speed, ">", 1.8, 0.15]
+      walk:
+        - [speed, ">", 0.35, 0.08]
+        - [speed, "<", 1.8, 0.15]
+      turn:
+        - [abs_yaw_rate, ">", 35.0, 6.0]
+        - [speed, "<", 0.35, 0.08]
+
+  lower:
+    default: upright
+    default_score: 0.5
+    switch_penalty: 6.0
+    min_duration: 0.5
+    labels:
+      squat:
+        - [pelvis_rel, "<", 0.75, 0.04]
+        - [knee_flex_mean, ">", 60.0, 8.0]
+        - [knee_h_min, ">", 0.10, 0.02]
+      kneel:            # at least one knee on (near) the floor
+        - [pelvis_rel, "<", 0.75, 0.04]
+        - [knee_h_min, "<", 0.07, 0.02]
+      bend_forward:
+        - [trunk_pitch, ">", 35.0, 5.0]
+        - [pelvis_rel, ">", 0.80, 0.04]
+      single_leg:
+        - [ankle_h_max, ">", 0.12, 0.02]
+        - [speed, "<", 0.4, 0.08]
+
+  upper:
+    default: neutral
+    default_score: 0.5
+    switch_penalty: 6.0
+    min_duration: 0.4
+    labels:
+      t_pose:
+        - [left_hand_lat, ">", 0.8, 0.05]
+        - [right_hand_lat, ">", 0.8, 0.05]
+        - [left_hand_up, ">", -0.3, 0.05]
+        - [left_hand_up, "<", 0.3, 0.05]
+        - [right_hand_up, ">", -0.3, 0.05]
+        - [right_hand_up, "<", 0.3, 0.05]
+      arms_up:
+        - [left_hand_over_head, ">", 0.05, 0.02]
+        - [right_hand_over_head, ">", 0.05, 0.02]
+      wave_right:
+        - [right_hand_up, ">", 0.15, 0.05]
+        - [right_hand_osc, ">", 0.08, 0.015]
+        - [left_hand_over_head, "<", 0.0, 0.02]
+      wave_left:
+        - [left_hand_up, ">", 0.15, 0.05]
+        - [left_hand_osc, ">", 0.08, 0.015]
+        - [right_hand_over_head, "<", 0.0, 0.02]
+      raise_right:
+        - [right_hand_up, ">", 0.3, 0.05]
+        - [right_hand_osc, "<", 0.06, 0.015]
+        - [left_hand_up, "<", 0.0, 0.05]
+      raise_left:
+        - [left_hand_up, ">", 0.3, 0.05]
+        - [left_hand_osc, "<", 0.06, 0.015]
+        - [right_hand_up, "<", 0.0, 0.05]
+      reach_forward:
+        - [left_hand_fwd_lp, ">", 0.6, 0.05]
+        - [right_hand_fwd_lp, ">", 0.6, 0.05]
+        - [left_hand_over_head, "<", -0.05, 0.02]
+        - [right_hand_over_head, "<", -0.05, 0.02]
+      reach_right:
+        - [right_hand_fwd_lp, ">", 0.6, 0.05]
+        - [left_hand_fwd_lp, "<", 0.3, 0.05]
+        - [right_hand_over_head, "<", -0.05, 0.02]
+      reach_left:
+        - [left_hand_fwd_lp, ">", 0.6, 0.05]
+        - [right_hand_fwd_lp, "<", 0.3, 0.05]
+        - [left_hand_over_head, "<", -0.05, 0.02]
+
+# Composite segments shorter than this (s) are absorbed by a neighbour.
+min_composite_duration: 0.3
+# Segments whose mean label probability is below this are flagged for human review.
+review_threshold: 0.7

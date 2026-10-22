@@ -1,0 +1,17 @@
+# Project venv (.venv, Python 3.10) - data pipeline, retargeting, MuJoCo evaluation.
+# Isaac Lab training runs in the separate `isaaclab` conda env (Isaac Sim 5.1 / Isaac Lab 2.3.2, Python 3.11).
+numpy==2.2.6
+scipy==1.15.3
+h5py==3.16.0
+PyYAML==6.0.3
+scikit-learn==1.7.2
+matplotlib==3.10.9
+mujoco==3.16.0
+mink==1.3.0
+qpsolvers==4.13.0
+daqp==0.10.3
+quadprog==0.1.13
+xrobotoolkit-sdk==1.1.0      # PICO <-> PC (needs XRoboToolkit-PC-Service running)
+onnxruntime==1.23.2          # MuJoCo sim2sim of exported policies
+pytest==9.1.1
+# torch (CPU) for TorchScript policies:  pip install torch --index-url https://download.pytorch.org/whl/cpu

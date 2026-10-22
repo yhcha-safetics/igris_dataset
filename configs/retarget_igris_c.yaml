@@ -1,0 +1,119 @@
+# Stage 3: PICO 24-joint skeleton -> Robros IGRIS-C (31 DOF) retargeting.
+#
+# IK match tables come from Robros' GMR fork (robrosinc/GMR @ e47d4f8,
+# general_motion_retargeting/ik_configs/xrobot_to_igris_c.json). Rotation offsets were
+# converted to this pipeline's joint-frame convention with
+#   igris_pipeline.retarget.ik_config.from_gmr_json()
+# (in this convention every PICO joint is identity in a forward-facing T-pose, so the
+# offsets reduce to identity for trunk/legs and +-90 deg about X for the arms).
+#
+# Entry format: robot_body: [pico_joint, pos_weight, rot_weight, pos_offset_xyz, rot_offset_wxyz]
+# Weights are multiplied per frame by the joint confidence from stage 1-2.
+#
+# Changes vs. Robros' table (measured with tests/eval_retarget.py on simulated data):
+#  * Link_Ankle_Roll_* is matched to the human *ankle* instead of the toe ("foot") joint:
+#    shank direction error 9.9 -> 3.7 deg, foot skate in contact 0.12 -> 0.09 m/s.
+#  * geometry_offsets (below) compensate the robot's zero-pose segment tilt (thigh 8.9 deg,
+#    upper arm 2.9 deg, forearm 2.2 deg) so orientation matching aligns segment directions.
+#  * arms: orientation weights halved and stage-2 elbow/wrist *position* targets added, trunk
+#    (base_link) orientation weight 50: arm twists the robot cannot reach no longer tilt the
+#    torso (forward reach: torso tilt 36 -> 9.5 deg, base angular velocity peak 12.9 -> 4.7 rad/s).
+
+robot:
+  mjcf: third_party/robros_GMR/assets/robros_igris_c_v2/igris_c_v2.xml
+  root_body: base_link
+  human_root: pelvis
+
+scaling:
+  # kinematic: scale every bone by the robot/human segment-length ratio of its body part
+  #            (legs, arms, trunk, hip/shoulder width), rebuilt from the pelvis
+  # gmr:       GMR's root-relative uniform scale table, ratio = stature / human_height_assumption
+  mode: kinematic
+  human_height_assumption: 1.8
+  gmr_scale_table:
+    pelvis: 0.9
+    spine3: 0.9
+    head: 1.0
+    left_hip: 0.9
+    right_hip: 0.9
+    left_knee: 0.9
+    right_knee: 0.9
+    left_foot: 0.9
+    right_foot: 0.9
+    left_shoulder: 0.9
+    right_shoulder: 0.9
+    left_elbow: 0.9
+    right_elbow: 0.9
+    left_wrist: 0.9
+    right_wrist: 0.9
+
+stage1:
+  Link_Waist_Pitch:        [pelvis,         20, 20, [0.1, 0.0, 0.0],  [1.0, 0.0, 0.0, 0.0]]
+  Link_Hip_Yaw_Left:       [left_hip,        0, 10, [0.0, 0.0, 0.0],  [1.0, 0.0, 0.0, 0.0]]
+  Link_Knee_Pitch_Left:    [left_knee,      20, 10, [0.0, 0.0, 0.0],  [1.0, 0.0, 0.0, 0.0]]
+  Link_Ankle_Roll_Left:    [left_ankle,    100, 10, [0.0, 0.0, 0.0],  [1.0, 0.0, 0.0, 0.0]]
+  Link_Hip_Yaw_Right:      [right_hip,       0, 10, [0.0, 0.0, 0.0],  [1.0, 0.0, 0.0, 0.0]]
+  Link_Knee_Pitch_Right:   [right_knee,     20, 10, [0.0, 0.0, 0.0],  [1.0, 0.0, 0.0, 0.0]]
+  Link_Ankle_Roll_Right:   [right_ankle,   100, 10, [0.0, 0.0, 0.0],  [1.0, 0.0, 0.0, 0.0]]
+  base_link:               [spine3,         20, 50, [0.0, 0.0, 0.0],  [1.0, 0.0, 0.0, 0.0]]
+  Link_Shoulder_Yaw_Left:  [left_shoulder,   0, 5, [0.0, 0.0, 0.0],  [0.707107, 0.707107, 0.0, 0.0]]
+  Link_Elbow_Pitch_Left:   [left_elbow,      0, 5, [0.0, 0.0, 0.0],  [0.707107, 0.707107, 0.0, 0.0]]
+  Link_Wrist_Pitch_Left:   [left_wrist,      0, 5, [0.0, 0.0, 0.0],  [0.707107, 0.707107, 0.0, 0.0]]
+  Link_Shoulder_Yaw_Right: [right_shoulder,  0, 5, [0.0, 0.0, 0.0],  [0.707107, -0.707107, 0.0, 0.0]]
+  Link_Elbow_Pitch_Right:  [right_elbow,     0, 5, [0.0, 0.0, 0.0],  [0.707107, -0.707107, 0.0, 0.0]]
+  Link_Wrist_Pitch_Right:  [right_wrist,     0, 5, [0.0, 0.0, 0.0],  [0.707107, -0.707107, 0.0, 0.0]]
+  Link_Neck_Pitch:         [head,           20, 20, [0.0, 0.0, -0.1], [1.0, 0.0, 0.0, 0.0]]
+
+stage2:
+  Link_Waist_Pitch:        [pelvis,         20,  5, [0.0, 0.0, 0.0],  [1.0, 0.0, 0.0, 0.0]]
+  Link_Hip_Yaw_Left:       [left_hip,       10,  5, [0.0, 0.0, 0.0],  [1.0, 0.0, 0.0, 0.0]]
+  Link_Knee_Pitch_Left:    [left_knee,      20,  5, [0.0, 0.0, 0.0],  [1.0, 0.0, 0.0, 0.0]]
+  Link_Ankle_Roll_Left:    [left_ankle,    100, 10, [0.0, 0.0, 0.0],  [1.0, 0.0, 0.0, 0.0]]
+  Link_Hip_Yaw_Right:      [right_hip,      10,  5, [0.0, 0.0, 0.0],  [1.0, 0.0, 0.0, 0.0]]
+  Link_Knee_Pitch_Right:   [right_knee,     20,  5, [0.0, 0.0, 0.0],  [1.0, 0.0, 0.0, 0.0]]
+  Link_Ankle_Roll_Right:   [right_ankle,   100, 10, [0.0, 0.0, 0.0],  [1.0, 0.0, 0.0, 0.0]]
+  base_link:               [spine3,         50, 50, [0.0, 0.0, 0.0],  [1.0, 0.0, 0.0, 0.0]]
+  Link_Shoulder_Yaw_Left:  [left_shoulder,   0, 12.5, [0.0, 0.0, 0.0],  [0.707107, 0.707107, 0.0, 0.0]]
+  Link_Elbow_Pitch_Left:   [left_elbow,      10, 5, [0.0, 0.0, 0.0],  [0.707107, 0.707107, 0.0, 0.0]]
+  Link_Wrist_Pitch_Left:   [left_wrist,      20, 5, [0.0, 0.0, 0.0],  [0.707107, 0.707107, 0.0, 0.0]]
+  Link_Shoulder_Yaw_Right: [right_shoulder,  0, 12.5, [0.0, 0.0, 0.0],  [0.707107, -0.707107, 0.0, 0.0]]
+  Link_Elbow_Pitch_Right:  [right_elbow,     10, 5, [0.0, 0.0, 0.0],  [0.707107, -0.707107, 0.0, 0.0]]
+  Link_Wrist_Pitch_Right:  [right_wrist,     20, 5, [0.0, 0.0, 0.0],  [0.707107, -0.707107, 0.0, 0.0]]
+  Link_Neck_Pitch:         [head,            0, 10, [0.0, 0.0, 0.0],  [1.0, 0.0, 0.0, 0.0]]
+
+# body -> child body defining its segment; the rotation offset gets an extra swing that
+# maps the robot's actual zero-pose segment direction onto the ideal "hanging down" one.
+geometry_offsets:
+  Link_Hip_Yaw_Left: Link_Knee_Pitch_Left
+  Link_Knee_Pitch_Left: Link_Ankle_Roll_Left
+  Link_Hip_Yaw_Right: Link_Knee_Pitch_Right
+  Link_Knee_Pitch_Right: Link_Ankle_Roll_Right
+  Link_Shoulder_Yaw_Left: Link_Elbow_Pitch_Left
+  Link_Elbow_Pitch_Left: Link_Wrist_Pitch_Left
+  Link_Shoulder_Yaw_Right: Link_Elbow_Pitch_Right
+  Link_Elbow_Pitch_Right: Link_Wrist_Pitch_Right
+
+solver:
+  name: daqp
+  damping: 0.5
+  max_iter: 10          # per stage per frame (GMR: iterate while error drops > 1e-3)
+  tol: 0.001
+  velocity_limit: 9.42  # rad/s per joint (3*pi as in GMR); passed as `limits=` to mink
+  posture_cost: 0.02    # pull towards the default pose; matters for low-confidence joints
+  posture_cost_overrides:
+    ".*Shoulder_(Pitch|Yaw).*": 1.0   # collinear at shoulder roll ~90 deg (T-pose): avoid null-space drift
+    ".*Wrist.*": 0.1
+  min_confidence: 0.05  # task weight floor so tasks never vanish completely
+  balance:              # CoM over the support polygon on quasi-static frames (human feet in contact)
+    enabled: true
+    cost: 500.0         # x/y CoM task cost, scaled by staticness = exp(-(v_pelvis/speed_scale)^2)
+    speed_scale: 0.25   # m/s
+    margin: 0.02        # m, support polygon shrink
+    iters: 10
+    max_shift_rate: 0.3 # m/s, rate limit of the CoM correction (no trunk snapping at contact changes)
+
+postprocess:
+  ground: contact       # contact | raise_only | none  -- sole on the floor during human foot contact
+  smooth_hz: 8.0        # zero-phase low-pass on joint angles / root
+  joint_margin: 0.02    # rad, clip to (range - margin); ranges = MJCF ∩ Isaac URDF (robot.py)
+  max_speed_ratio: 0.8  # rate-limit joints to 80% of the actuator speed (configs/igris_c_actuators.yaml)

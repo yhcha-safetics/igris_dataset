@@ -1,0 +1,20 @@
+# IGRIS-C joint-level actuator model used by the MuJoCo evaluations.
+# Source: robrosinc/robros_lab_public, source/robros_lab_public/robros_lab_public/assets/robots/robros.py
+# (DelayedPDActuatorCfg groups X12-150, X8-120, X6-60, PLA), which Robros describes as
+# sim-to-real validated. Wrists / neck are fixed in that Isaac asset; their values below are
+# conservative choices (effort limits from the MJCF motors).
+#
+# Each entry: regex on the MJCF joint name -> parameters. First match wins.
+#   kp [Nm/rad], kd [Nms/rad], effort [Nm], velocity [rad/s], armature [kg m^2],
+#   friction [Nm] (MuJoCo frictionloss), viscous [Nms/rad] (MuJoCo damping)
+joints:
+  - {match: ".*Hip_Pitch.*",   kp: 118.435253, kd: 15.079645, effort: 150.0,    velocity: 10.4720, armature: 0.30,  friction: 0.5,  viscous: 2.4}
+  - {match: ".*Knee.*",        kp: 118.435253, kd: 15.079645, effort: 150.0,    velocity: 10.4720, armature: 0.18,  friction: 0.5,  viscous: 2.2}
+  - {match: ".*Hip_Roll.*",    kp: 122.136354, kd: 10.367256, effort: 120.0,    velocity: 13.2994, armature: 0.06,  friction: 0.1,  viscous: 3.0}
+  - {match: ".*Waist_Roll.*",  kp: 660.634418, kd: 34.67,     effort: 217.0253, velocity: 8.6608,  armature: 0.114, friction: 3.6,  viscous: 7.5}
+  - {match: ".*Waist_Pitch.*", kp: 230.579719, kd: 12.10,     effort: 120.0,    velocity: 15.6655, armature: 0.047, friction: 1.2,  viscous: 2.5}
+  - {match: ".*Ankle_Pitch.*", kp: 93.373568,  kd: 14.863025, effort: 163.1163, velocity: 18.1383, armature: 0.14,  friction: 0.5,  viscous: 0.1}
+  - {match: ".*Ankle_Roll.*",  kp: 77.634366,  kd: 12.355893, effort: 148.7251, velocity: 19.8934, armature: 0.12,  friction: 0.5,  viscous: 0.1}
+  - {match: ".*(Hip_Yaw|Waist_Yaw|Shoulder_|Elbow_).*", kp: 121.514570, kd: 6.077864, effort: 60.0, velocity: 16.0221, armature: 0.02, friction: 1.01, viscous: 1.8}
+  - {match: ".*Wrist.*",       kp: 20.0, kd: 1.0, effort: 8.0, velocity: 10.0, armature: 0.0068, friction: 0.1, viscous: 0.1}
+  - {match: ".*Neck.*",        kp: 15.0, kd: 0.8, effort: 7.0, velocity: 10.0, armature: 0.0002, friction: 0.05, viscous: 0.1}

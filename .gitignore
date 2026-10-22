@@ -1,0 +1,19 @@
+# environments / caches
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# recorded sessions, generated motions, training logs and checkpoints (large, regenerable)
+data/
+logs/
+*.h5
+
+# third-party robot assets: fetched by scripts/fetch_third_party.py (not redistributed here)
+third_party/
+
+# editor / OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

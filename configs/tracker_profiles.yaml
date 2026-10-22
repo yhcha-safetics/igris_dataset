@@ -1,0 +1,84 @@
+# Tracker profiles (stage 1-2): how much each joint can be trusted, and which correction
+# steps run, depending on which PICO sensors are present. The profile is chosen
+# automatically by `igris_pipeline.pico.device_probe.select_profile()` from what the
+# headset streams (body-tracking data, number of motion trackers, controllers / hands).
+#
+# confidence: base per-joint confidence by joint group, multiplied by validity/outlier terms.
+#   groups: head, hands (wrist+hand), arms (shoulder, elbow, collar), spine (spine1-3, neck),
+#           pelvis, legs (hip, knee), feet (ankle, foot)
+# observed_axes: label axes that can be trusted (lower-body labels are meaningless without
+#   any lower-body sensor).
+# cutoff_hz: zero-phase low-pass cutoff per joint group (lower = more smoothing for joints
+#   that are only *estimated* by PICO's solver).
+
+defaults:
+  fps: 50                 # output rate (matches 50 Hz policy rate in Isaac Lab / mjlab)
+  max_gap_s: 0.25         # interpolate gaps up to this; longer gaps stay invalid
+  max_joint_speed: 8.0    # m/s; faster jumps are treated as outliers
+  bone_length_normalize: true
+  foot_contact:
+    height: 0.06          # m above floor (ankle joint height is subtracted)
+    speed: 0.25           # m/s horizontal
+    min_duration_s: 0.08
+  calibration:
+    window_s: 2.0         # look for a still T-pose / I-pose in the first N seconds
+    search_s: 8.0
+
+profiles:
+  # PICO body tracking with 2 Motion Trackers on the ankles (standard full-body mode).
+  body_2trk:
+    description: "PICO body tracking, 2 ankle trackers + headset + controllers"
+    requires: {body: true, min_trackers: 0}
+    confidence: {head: 1.0, hands: 0.95, arms: 0.8, spine: 0.6, pelvis: 0.7, legs: 0.65, feet: 0.9}
+    cutoff_hz: {head: 10, hands: 10, arms: 6, spine: 4, pelvis: 5, legs: 5, feet: 8}
+    anchor: {hands: controllers, feet: none}
+    foot_skate_cleanup: true
+    observed_axes: [loco, lower, upper]
+
+  # Body tracking plus a 3rd tracker (waist) improves pelvis / trunk estimate.
+  body_3trk:
+    description: "PICO body tracking, ankle trackers + waist tracker"
+    requires: {body: true, min_trackers: 3}
+    confidence: {head: 1.0, hands: 0.95, arms: 0.8, spine: 0.75, pelvis: 0.9, legs: 0.75, feet: 0.9}
+    cutoff_hz: {head: 10, hands: 10, arms: 6, spine: 5, pelvis: 8, legs: 6, feet: 8}
+    anchor: {hands: controllers, feet: none}
+    foot_skate_cleanup: true
+    observed_axes: [loco, lower, upper]
+
+  # Motion Trackers in object-tracking mode strapped to body parts (no PICO body solver).
+  # The role of each tracker is given by serial number in `tracker_roles` (or assigned
+  # automatically at calibration time by height: lowest two -> ankles, middle -> pelvis).
+  sparse_trackers:
+    description: "Headset + controllers + up to 3 motion trackers (object mode)"
+    requires: {body: false, min_trackers: 1}
+    confidence: {head: 1.0, hands: 0.95, arms: 0.5, spine: 0.4, pelvis: 0.8, legs: 0.4, feet: 0.9}
+    cutoff_hz: {head: 10, hands: 10, arms: 5, spine: 3, pelvis: 6, legs: 4, feet: 8}
+    anchor: {hands: controllers, feet: trackers}
+    foot_skate_cleanup: true
+    observed_axes: [loco, lower, upper]
+
+  # Headset + 2 controllers only: upper body is solved by IK, lower body is a guess.
+  hmd_3pt:
+    description: "Headset + controllers only (3-point tracking)"
+    requires: {body: false, min_trackers: 0}
+    confidence: {head: 1.0, hands: 0.95, arms: 0.5, spine: 0.35, pelvis: 0.3, legs: 0.1, feet: 0.1}
+    cutoff_hz: {head: 10, hands: 10, arms: 5, spine: 3, pelvis: 3, legs: 3, feet: 3}
+    anchor: {hands: controllers, feet: none}
+    foot_skate_cleanup: false
+    observed_axes: [loco, upper]
+
+# Sensor mounting offsets used when there is no PICO body solver (hmd_3pt, sparse_trackers),
+# expressed in the segment's local frame (pipeline convention: x fwd, y left, z up at T-pose).
+# A body-tracking session prints calibrated `controller_to_wrist_<side>` values in its
+# proc/calibration record; copy them here for your controllers.
+sensor_offsets:
+  hmd_to_head: [0.09, 0.0, 0.06]
+  controller_to_wrist:
+    left:  {pos: [0.04, 0.10, 0.0], rot_xyz_deg: [20.0, 0.0, 0.0]}
+    right: {pos: [0.04, -0.10, 0.0], rot_xyz_deg: [-20.0, 0.0, 0.0]}
+
+# serial number -> body joint, for sparse_trackers profile (optional)
+tracker_roles: {}
+#  "PC2310MLKC290001F": pelvis
+#  "PC2310MLKC290002F": left_ankle
+#  "PC2310MLKC290003F": right_ankle
