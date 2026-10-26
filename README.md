@@ -19,9 +19,12 @@ PICO 4 VR 헤드셋 + 모션 트래커로 사람 동작을 수집해, 로브로�
 | Isaac Lab 학습/평가 | conda `isaaclab` (Python 3.11) | Isaac Sim 5.1 + Isaac Lab 2.3.2 (`C:\IsaacLab`) |
 
 ```powershell
-C:\Users\c\AppData\Local\Programs\Python\Python310\python.exe -m venv .venv
+& "$env:LOCALAPPDATA\Programs\Python\Python310\python.exe" -m venv .venv   # python.org Python 3.10
 .venv\Scripts\python -m pip install -r requirements.txt
 ```
+
+> `.venv`는 python.org에서 받은 Python 3.10으로 만듭니다. Miniconda/Anaconda의 Python으로 만들면 그 폴더에 있는
+> 오래된 `msvcp140.dll`(14.27)이 먼저 로드되어 `import mujoco`가 `WinError 1114`(DLL 초기화 실패)로 실패합니다.
 
 외부 자산은 이 저장소에 포함하지 않습니다.
 `.venv\Scripts\python scripts\fetch_third_party.py`를 실행하면 검증된 커밋으로 `third_party/`에 clone 됩니다.
@@ -56,16 +59,19 @@ C:\Users\c\AppData\Local\Programs\Python\Python310\python.exe -m venv .venv
    `0x80070666`(다른 버전이 이미 설치됨)이 나오면 더 새 VC++ 2015-2022 런타임이 있는 것이므로 건너뜁니다.
 3. 관리자 PowerShell에서 압축을 푼 폴더로 이동해 `install.bat`를 실행하고, 방화벽 규칙을 전체 경로로 다시 추가합니다.
    - 탐색기에서 "관리자 권한으로 실행"하면 작업 폴더가 `C:\Windows\System32`가 되어 `setting.ini`·`db` 처리가 엉뚱한 곳에 적용됩니다.
-   - 스크립트의 `%CUR_DIR%`가 설정되지 않아 방화벽 규칙이 상대 경로로 등록됩니다.
+   - 스크립트의 `%CUR_DIR%`가 설정되지 않아 방화벽 규칙(`picobusinesssuit`)이 상대 경로로 등록됩니다.
+     이 규칙을 지우고 같은 이름으로 다시 추가합니다. 이름이 같아야 `uninstallScript.bat`가 함께 지웁니다.
 
    ```powershell
    cd <압축 푼 폴더>
    .\install.bat
-   netsh advfirewall firewall add rule name="XRoboToolkit-PC-Service" dir=in action=allow program="<압축 푼 폴더>\RoboticsServiceProcess.exe" enable=yes profile=any
+   netsh advfirewall firewall delete rule name="picobusinesssuit"
+   netsh advfirewall firewall add rule name="picobusinesssuit" dir=in action=allow program="<압축 푼 폴더>\RoboticsServiceProcess.exe" enable=yes profile=any
    ```
 4. `runService.bat`로 서비스를 실행합니다(창 없이 백그라운드, 한 번에 하나만 실행).
    - `netstat -ano | findstr "63901 60061"`에서 두 포트가 LISTENING이면 정상입니다.
-   - 서비스 로그는 `%LOCALAPPDATA%\PICOBusinessSuitData\log\<날짜>.txt`에 남습니다.
+   - 서비스 로그는 `%LOCALAPPDATA%\PICOBusinessSuitData\log\<서비스를 시작한 날짜>.txt`에 남습니다(PowerShell에서는 `$env:LOCALAPPDATA`).
+     서비스를 다시 시작하기 전까지 같은 파일에 이어서 기록되므로 오늘 날짜 파일이 없을 수 있습니다.
      헤드셋 접속은 `new tcp connect device`, 끊김은 `remove tcp`로 기록됩니다.
 
 Qt는 설치하지 않아도 됩니다. 릴리스 zip에 Qt 런타임 DLL이 들어 있고, Qt 설치는 서비스를 소스에서 빌드할 때만 필요합니다.
@@ -74,6 +80,7 @@ Qt는 설치하지 않아도 됩니다. 릴리스 zip에 Qt 런타임 DLL이 들
 
 1. 헤드셋에서 개발자 모드와 USB 디버깅을 켭니다(설정 → 일반 → 정보 → 소프트웨어 버전을 여러 번 탭).
    PC에는 Android Platform-Tools(`adb`)를 설치하고 PATH에 추가합니다.
+   USB로 처음 연결하면 헤드셋에 뜨는 USB 디버깅 허용 창을 수락합니다. `adb devices`에서 `unauthorized`가 아니라 `device`로 보여야 합니다.
 2. 기종에 맞는 APK를 [Releases](https://github.com/XR-Robotics/XRoboToolkit-Unity-Client/releases) v1.1.1에서 받아 설치합니다.
    기종은 `adb shell getprop ro.product.model`로 확인합니다.
 
@@ -83,7 +90,8 @@ Qt는 설치하지 않아도 됩니다. 릴리스 zip에 Qt 런타임 DLL이 들
    | PICO 4 Ultra (`A9210`) | 14 (API 34) | `XRoboToolkit-PICO-1.1.1.apk` (SDK29 빌드도 설치·스트리밍 확인) |
 
    ```powershell
-   adb install -r -g XRoboToolkit-PICO-1.1.1.apk
+   adb install -r -g XRoboToolkit-PICO-1.1.1-SDK29.apk   # PICO 4
+   adb install -r -g XRoboToolkit-PICO-1.1.1.apk         # PICO 4 Ultra
    ```
 3. 라이브러리 → 알 수 없는 출처에서 실행합니다.
    처음 실행할 때는 헤드셋이 인터넷에 연결되어 있어야 합니다(없으면 "No entitlement info").
@@ -101,12 +109,16 @@ Qt는 설치하지 않아도 됩니다. 릴리스 zip에 Qt 런타임 DLL이 들
 7. 감지 실행. 아래 명령은 PowerShell 기준이며, cmd에서는 `#` 이후 주석을 빼고 실행합니다.
 
 ```powershell
-.venv\Scripts\python scripts\01_probe_device.py --body-trackers 2     # 실기
+.venv\Scripts\python scripts\01_probe_device.py --body-trackers 2     # 실기 (Full body, 발목 트래커 2개)
+.venv\Scripts\python scripts\01_probe_device.py --body-trackers 3     # 실기 (Full body, 발목 2개 + 허리 1개)
 .venv\Scripts\python scripts\01_probe_device.py --simulate body_2trk   # 헤드셋 없이 시험
 ```
 
+`--body-trackers`는 Full body 모드에서만 쓰입니다. Object / None 모드에서는 무시됩니다.
+
 `No packets received`가 나오면 다음 순서로 확인합니다.
-서비스 실행 → 앱 Status WORKING → Send 켜짐 → 방화벽 TCP 63901 → (Full body이면) 트래커 캘리브레이션.
+서비스 실행 → 방화벽 TCP 63901 → 앱 Status WORKING(서비스 로그에 `new tcp connect device`) → Send 켜짐 → (Full body이면) 트래커 캘리브레이션.
+앱의 WORKING 표시는 연결이 끊겨도 남아 있을 수 있으므로 서비스 로그로 확인합니다.
 
 **감지 항목과 한계** (`igris_pipeline/pico/device_probe.py`)
 
@@ -137,7 +149,9 @@ PICO 바디 트래킹은 **보정된 트래커가 최소 2개** 있어야 동작
 .venv\Scripts\python scripts\02_record.py --session s01 --subject-height 1.72   # 오른손 A: 시작/정지, B: 마커
 ```
 
-- A/B 버튼은 PC의 `02_record.py`가 읽습니다. 상태(`[rec] recording ...`, `[rec] saved ...`)는 PC 터미널에만 표시되고 헤드셋에는 표시되지 않습니다.
+- Full body에서 허리 트래커를 착용했다면 `02_record.py`에도 `--body-trackers 3`을 줍니다. `01_probe_device.py`의 설정은 이어지지 않습니다.
+- A/B 버튼은 PC의 `02_record.py`가 읽습니다. 상태(`[rec] recording ...`, `[rec] stopped`, `[rec] saved ...`)는 PC 터미널에만 표시되고 헤드셋에는 표시되지 않습니다.
+  10프레임 이하인 에피소드는 저장하지 않으므로 `[rec] stopped` 바로 앞에 `[rec] saved ...`가 없으면 버려진 것입니다. 세션은 Ctrl+C로 끝냅니다.
 - 앱의 Data Collection → **Record**는 헤드셋 내부(`/sdcard/Download/trackingData_*.txt`)에 따로 저장하는 기능이며 이 파이프라인에서는 쓰지 않습니다.
   같은 Record 버튼을 다시 누르면 정지합니다.
 

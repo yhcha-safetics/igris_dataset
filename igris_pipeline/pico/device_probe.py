@@ -94,8 +94,9 @@ def probe(duration: float = 3.0, source=None, declared_body_trackers: int | None
             src.close()
 
     if len(frames) < 2:
-        rep.notes.append("No packets received. Check: PC service running, headset app 'Send' on, "
-                         "same network / firewall rule (TCP 63901), PC IP entered on the headset.")
+        rep.notes.append("No packets received. Check in order: PC service running, firewall inbound rule "
+                         "(TCP 63901), PC IP entered on the headset and app Status WORKING (service log: "
+                         "'new tcp connect device'), 'Send' on, Motion Trackers calibrated if in Full body mode.")
         rep.profile = "none"
         return rep
     rep.connected = True

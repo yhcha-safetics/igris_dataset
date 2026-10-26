@@ -1,9 +1,10 @@
 """Live PICO data through XRoboToolkit (stage 1).
 
-Requirements (see README "PICO 연결"):
+Requirements (see README "1-1. PICO 4 / 4 Ultra 연결"):
   * PC: XRoboToolkit-PC-Service running (RoboticsServiceProcess.exe, Windows build)
   * Headset: XRoboToolkit Unity client APK (use the *-SDK29.apk build on PICO 4),
-    PC IP entered, Motion Tracker set to "Full body" for body tracking, "Send" toggled on
+    PC IP entered, Motion Tracker set to "Full body" for body tracking, "Send" toggled on,
+    "Switch w/ A Button" off (the recorder uses A to start / stop episodes)
   * Python: ``pip install xrobotoolkit-sdk`` (>=3.10)
 
 Known quirks of the SDK that this module works around:
