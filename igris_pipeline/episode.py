@@ -25,6 +25,7 @@ Every stage only *adds* groups, so an episode can be re-processed from any stage
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -74,22 +75,30 @@ class Episode:
 
     # ---- IO ---------------------------------------------------------------------
     def save(self, path: str | Path) -> Path:
+        """Write the episode. Stages save over the file they loaded (the raw recording), so the data is
+        written to a temporary file first and swapped in only once complete."""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with h5py.File(path, "w") as f:
-            f.attrs["schema_version"] = SCHEMA_VERSION
-            f.attrs["fps"] = float(self.fps)
-            f.attrs.setdefault("created", time.strftime("%Y-%m-%dT%H:%M:%S"))
-            for k, v in self.attrs.items():
-                f.attrs[k] = v
-            for k, arr in self.data.items():
-                arr = np.asarray(arr)
-                kw = {"compression": "gzip", "compression_opts": 4} if arr.size > 1024 else {}
-                f.create_dataset(k, data=arr, **kw)
-            for g, ga in self.group_attrs.items():
-                grp = f.require_group(g)
-                for k, v in ga.items():
-                    grp.attrs[k] = v
+        tmp = path.with_name(path.name + ".tmp")
+        try:
+            with h5py.File(tmp, "w") as f:
+                f.attrs["schema_version"] = SCHEMA_VERSION
+                f.attrs["fps"] = float(self.fps)
+                f.attrs.setdefault("created", time.strftime("%Y-%m-%dT%H:%M:%S"))
+                for k, v in self.attrs.items():
+                    f.attrs[k] = v
+                for k, arr in self.data.items():
+                    arr = np.asarray(arr)
+                    kw = {"compression": "gzip", "compression_opts": 4} if arr.size > 1024 else {}
+                    f.create_dataset(k, data=arr, **kw)
+                for g, ga in self.group_attrs.items():
+                    grp = f.require_group(g)
+                    for k, v in ga.items():
+                        grp.attrs[k] = v
+            os.replace(tmp, path)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
         return path
 
     @classmethod

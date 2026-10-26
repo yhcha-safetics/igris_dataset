@@ -13,7 +13,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .auto_label import AXES, LearnedLabeler, axis_label_names, read_labels
+from .auto_label import AXES, AxisResult, LearnedLabeler, axis_label_names, composite_segments, read_labels
 from .features import compute_features, feature_matrix
 
 
@@ -81,7 +81,11 @@ def import_review_csv(ep, path, rules: dict):
     """Apply a corrected CSV (time based) to the episode's frame labels."""
     fps = float(ep.group_attrs.get("proc", {}).get("fps", ep.fps))
     T = ep["labels/loco"].shape[0]
-    names = {a: axis_label_names(rules["axes"][a]) for a in AXES}
+    ga = ep.group_attrs.get("labels", {})
+    # the stored frame labels index the episode's own name lists (which may already hold labels a
+    # reviewer added earlier), so those lists are authoritative; the rules only seed missing ones
+    names = {a: (json.loads(ga[f"{a}_names"]) if f"{a}_names" in ga else axis_label_names(rules["axes"][a]))
+             for a in AXES}
     frame = {a: ep[f"labels/{a}"].copy() for a in AXES}
     with open(path, encoding="utf-8-sig") as f:
         for row in csv.DictReader(f):
@@ -94,6 +98,10 @@ def import_review_csv(ep, path, rules: dict):
     for a in AXES:
         ep[f"labels/{a}"] = frame[a].astype(np.int16)
         ep.group_attrs["labels"][f"{a}_names"] = json.dumps(names[a])
+    # rebuild the composite segments from the reviewed frame labels (downstream stages and
+    # export_review_csv read `segments`); reviewed labels have confidence 1
+    results = {a: AxisResult(names[a], frame[a].astype(int), np.eye(len(names[a]))[frame[a]]) for a in AXES}
+    ep.group_attrs["labels"]["segments"] = json.dumps(composite_segments(results, fps, 0.0), ensure_ascii=False)
     ep.group_attrs["labels"]["reviewed"] = 1
     return ep
 

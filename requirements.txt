@@ -13,5 +13,6 @@ daqp==0.10.3
 quadprog==0.1.13
 xrobotoolkit-sdk==1.1.0      # PICO <-> PC (needs XRoboToolkit-PC-Service running)
 onnxruntime==1.23.2          # MuJoCo sim2sim of exported policies
+imageio-ffmpeg==0.6.0        # ffmpeg binary for view_motion.py --mp4 when ffmpeg is not on PATH
 pytest==9.1.1
 # torch (CPU) for TorchScript policies:  pip install torch --index-url https://download.pytorch.org/whl/cpu

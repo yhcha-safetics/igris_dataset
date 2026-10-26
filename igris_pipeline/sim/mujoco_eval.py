@@ -284,7 +284,10 @@ def evaluate_clip(qpos: np.ndarray, fps: float, robot: IgrisModel | None = None,
     out = {"duration_s": round(len(qpos) / fps, 2)}
     out["kinematic"] = kinematic_report(robot, qpos, fps, jp)
     out["static_balance"] = static_balance_report(robot, qpos)
-    out["pd_replay_harness"] = pd_replay(IgrisModel(robot.path), qpos, fps, jp, harness=True, gain_scale=4.0)
+    # pd_replay reconfigures the model it is given (servo gains, joint params) identically on every
+    # call with the same gain_scale, so one harness copy serves the clip and all its segments
+    harness_robot = IgrisModel(robot.path)
+    out["pd_replay_harness"] = pd_replay(harness_robot, qpos, fps, jp, harness=True, gain_scale=4.0)
     if harness_free:
         out["pd_replay_free"] = pd_replay(IgrisModel(robot.path), qpos, fps, jp, harness=False)
     if segments:
@@ -293,7 +296,7 @@ def evaluate_clip(qpos: np.ndarray, fps: float, robot: IgrisModel | None = None,
             a, b = int(sg["start"]), int(sg["end"])
             if b - a < int(0.5 * fps):
                 continue
-            hb = pd_replay(IgrisModel(robot.path), qpos[a:b], fps, jp, harness=True, gain_scale=4.0)
+            hb = pd_replay(harness_robot, qpos[a:b], fps, jp, harness=True, gain_scale=4.0)
             sb = static_balance_report(robot, qpos[a:b])
             rows.append({"name": sg.get("name", ""), "t_start": round(a / fps, 2), "t_end": round(b / fps, 2),
                          "com_in_support": sb["com_in_support_ratio"], "harness_mean_pct_mg": hb["harness_force_pct_mg"]["mean"],
