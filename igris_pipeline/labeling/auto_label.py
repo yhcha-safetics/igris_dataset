@@ -240,10 +240,12 @@ def composite_segments(results: dict[str, AxisResult], fps: float, review_thr: f
 
 def write_labels(ep, out: dict) -> None:
     """Store labelling results into an Episode (labels/* group)."""
+    ga = ep.group_attrs.setdefault("labels", {})
     for axis, r in out["axes"].items():
         ep[f"labels/{axis}"] = r.frame.astype(np.int16)
-        ep.group_attrs.setdefault("labels", {})[f"{axis}_names"] = json.dumps(r.names)
-    ep.group_attrs.setdefault("labels", {})["segments"] = json.dumps(out["segments"], ensure_ascii=False)
+        ga[f"{axis}_names"] = json.dumps(r.names)
+    ga["segments"] = json.dumps(out["segments"], ensure_ascii=False)
+    ga.pop("reviewed", None)  # automatic labels replace any reviewed ones -> no longer reviewed
 
 
 def read_labels(ep) -> dict[str, list[str]]:

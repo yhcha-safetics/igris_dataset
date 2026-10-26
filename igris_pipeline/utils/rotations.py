@@ -115,12 +115,24 @@ def slerp(q0: np.ndarray, q1: np.ndarray, t: np.ndarray | float) -> np.ndarray:
 
 
 def angular_velocity(q_wxyz: np.ndarray, dt: float) -> np.ndarray:
-    """World-frame angular velocity from an orientation sequence (T,...,4) -> (T,...,3)."""
+    """World-frame angular velocity from an orientation sequence (T,...,4) -> (T,...,3).
+
+    Central difference inside, one-sided at the ends (same timing as the linear velocities of
+    retarget/export.py, so both describe the same instant)."""
     q = quat_continuity(q_wxyz, axis=0)
-    dq = quat_mul(q[1:], quat_conj(q[:-1]))
-    dq = quat_normalize(dq)
-    rv = quat_to_rot(dq).as_rotvec().reshape(*dq.shape[:-1], 3) / dt
-    return np.concatenate([rv[:1], rv], axis=0)
+    out = np.zeros(q.shape[:-1] + (3,))
+    if q.shape[0] < 2:
+        return out
+
+    def rate(a, b, span):
+        dq = quat_normalize(quat_mul(b, quat_conj(a)))
+        return quat_to_rot(dq).as_rotvec().reshape(*dq.shape[:-1], 3) / (span * dt)
+
+    if q.shape[0] > 2:
+        out[1:-1] = rate(q[:-2], q[2:], 2.0)
+    out[:1] = rate(q[:1], q[1:2], 1.0)
+    out[-1:] = rate(q[-2:-1], q[-1:], 1.0)
+    return out
 
 
 def finite_diff(x: np.ndarray, dt: float) -> np.ndarray:

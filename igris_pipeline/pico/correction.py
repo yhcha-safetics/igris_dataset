@@ -116,15 +116,13 @@ def _rot_z(yaw):
 
 def _detect_outliers(pos, fps, max_speed, thr=0.06):
     """(T,24,3) -> (T,24) bool, robust to the slow drifts of the body solver."""
-    T = pos.shape[0]
     k = max(5, int(0.12 * fps) | 1)
     med = median_filter(pos, size=(k, 1, 1), mode="nearest")
     res = np.linalg.norm(pos - med, axis=-1)
     mad = np.median(res, axis=0, keepdims=True) + 1e-4
     speed = np.linalg.norm(np.gradient(pos, 1.0 / fps, axis=0), axis=-1)
     out = (res > np.maximum(thr, 6 * mad)) | ((speed > max_speed) & (res > 0.5 * thr))
-    out = binary_closing(out, structure=np.ones((3, 1)))
-    return out & (np.arange(T)[:, None] >= 0)
+    return binary_closing(out, structure=np.ones((3, 1)))
 
 
 def _interp_flagged(x, flagged):
@@ -367,6 +365,9 @@ def correct_episode(ep: Episode, cfg_all: dict, profile: str | None = None,
         raw_valid = ep["raw/body/valid"]
         bp, bv, bg = resample_series(t, ep["raw/body/pos"], raw_valid, tn, max_gap)
         bq, _, _ = resample_series(t, ep["raw/body/quat"], raw_valid, tn, max_gap, is_quat=True)
+        if bv.sum() < 2:
+            raise ValueError(f"profile {profile!r} needs PICO body-tracking data, but the episode has "
+                             f"{int(raw_valid.sum())} valid body frames; use a non-body profile (--profile)")
         report["steps"].append({"resample": {"in_frames": int(len(t)), "out_frames": T, "fps": fps,
                                              "body_valid_in": float(raw_valid.mean()),
                                              "body_valid_out": float(bv.mean()), "gap_filled": int(bg.sum())}})
@@ -394,7 +395,11 @@ def correct_episode(ep: Episode, cfg_all: dict, profile: str | None = None,
         floor = float(np.percentile(ank_z, 5) - ANKLE_HEIGHT)
         lengths = np.median(np.linalg.norm(
             bp[valid][:, [c for _, c in BONES]] - bp[valid][:, [p for p, _ in BONES]], axis=-1), axis=0)
-        yaw0 = float(np.median(_heading_from_body(bp[win])))
+        # median of the headings unwrapped around their circular mean (a plain median of angles
+        # wrapped to (-pi, pi] is biased / 180 deg off when the subject faces ~-X)
+        hd = _heading_from_body(bp[win])
+        hc = np.arctan2(np.sin(hd).mean(), np.cos(hd).mean())
+        yaw0 = float(hc + np.median(np.angle(np.exp(1j * (hd - hc)))))
         stature = float(np.median(bp[win, J["head"], 2]) - floor + 0.12)
         # joint-frame sanity: at a T-pose PICO joints should be ~heading-aligned
         rest_dev = quat_angle_between(bq[win].mean(0), np.broadcast_to(yaw_quat(yaw0), (NUM_JOINTS, 4)))
@@ -547,7 +552,9 @@ def correct_episode(ep: Episode, cfg_all: dict, profile: str | None = None,
         v_xy = np.linalg.norm(np.gradient(lowpass(bp[:, aj, :2], fps, 3.0), 1.0 / fps, axis=0), axis=-1)
         c = (h < fc["height"]) & (v_xy < fc["speed"])
         n = max(1, int(fc["min_duration_s"] * fps))
-        c = binary_opening(binary_closing(c, np.ones(n)), np.ones(n))
+        # edge padding: scipy's morphology treats outside samples as False and would drop contact
+        # on the first / last frames of a clip that starts / ends standing
+        c = binary_opening(binary_closing(np.pad(c, n, mode="edge"), np.ones(n)), np.ones(n))[n:-n]
         contact[:, k] = c
     if cfg.get("foot_skate_cleanup", False):
         skate_before = _foot_skate(bp, contact, fps)

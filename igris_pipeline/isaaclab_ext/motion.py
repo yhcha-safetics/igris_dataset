@@ -203,7 +203,8 @@ def available_body_names(motion_files: str | Sequence[str]) -> set[str]:
 
 def load_segments(path: str, target_fps: float | None = None) -> list[dict]:
     """Label segments from the optional NPZ ``meta`` JSON string (key ``segments``: dicts with ``start`` /
-    ``end`` frame indices, end exclusive). Indices are rescaled if the clip is resampled to ``target_fps``."""
+    ``end`` frame indices, end exclusive, at ``meta["source_fps"]`` if present, else the NPZ fps). Indices are
+    rescaled to ``target_fps``."""
     import json
 
     with np.load(path, allow_pickle=False) as f:
@@ -215,7 +216,9 @@ def load_segments(path: str, target_fps: float | None = None) -> list[dict]:
             return []
         fps = float(np.asarray(f["fps"]).reshape(-1)[0])
     segs = meta.get("segments", []) if isinstance(meta, dict) else []
-    scale = 1.0 if target_fps is None else target_fps / fps
+    # the pipeline writes segment indices at the retarget (source) rate, which can differ from the NPZ fps
+    seg_fps = float(meta.get("source_fps", fps)) if isinstance(meta, dict) else fps
+    scale = 1.0 if target_fps is None else target_fps / seg_fps
     out = []
     for s in segs:
         if "start" in s and "end" in s:
