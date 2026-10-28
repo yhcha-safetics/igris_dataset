@@ -1,9 +1,10 @@
 """Live PICO data through XRoboToolkit (stage 1).
 
-Requirements (see README "PICO 연결"):
+Requirements (see README "1-1. PICO 4 / 4 Ultra 연결"):
   * PC: XRoboToolkit-PC-Service running (RoboticsServiceProcess.exe, Windows build)
   * Headset: XRoboToolkit Unity client APK (use the *-SDK29.apk build on PICO 4),
-    PC IP entered, Motion Tracker set to "Full body" for body tracking, "Send" toggled on
+    PC IP entered, Motion Tracker set to "Full body" for body tracking, "Send" toggled on,
+    "Switch w/ A Button" off (the recorder uses A to start / stop episodes)
   * Python: ``pip install xrobotoolkit-sdk`` (>=3.10)
 
 Known quirks of the SDK that this module works around:
@@ -34,6 +35,7 @@ class XRFrame:
     left_ctrl: np.ndarray               # (7,)
     right_ctrl: np.ndarray              # (7,)
     buttons: dict = field(default_factory=dict)
+    axes: dict = field(default_factory=dict)  # "left" / "right": (2,) thumbstick x (right +), y (up +)
     body: np.ndarray | None = None      # (24,7) native, None if not fresh
     body_joint_ts: np.ndarray | None = None
     trackers: np.ndarray | None = None  # (N,7)
@@ -93,6 +95,9 @@ class XRTSource:
             left_hand_active=int(x.get_left_hand_is_active()),
             right_hand_active=int(x.get_right_hand_is_active()),
         )
+        if hasattr(x, "get_left_axis"):
+            fr.axes = {"left": np.asarray(x.get_left_axis(), dtype=np.float64)[:2],
+                       "right": np.asarray(x.get_right_axis(), dtype=np.float64)[:2]}
         if x.is_body_data_available():
             body = np.asarray(x.get_body_joints_pose(), dtype=np.float64)
             jts = np.asarray(x.get_body_joints_timestamp(), dtype=np.int64)
@@ -156,7 +161,8 @@ class FrameBuffer:
         bts = np.zeros((T, 24), dtype=np.int64)
         for i, f in enumerate(F):
             if f.body is not None:
-                body[i], bvalid[i], bts[i] = f.body, True, f.body_joint_ts
+                body[i], bvalid[i] = f.body, True
+                bts[i] = f.body_joint_ts if f.body_joint_ts is not None else f.t_ns // 1_000_000
         p, q, v = pose7_to_pipe(body)
         out["raw/body/pos"], out["raw/body/quat"] = p, q
         out["raw/body/valid"] = bvalid & v.all(axis=-1)
@@ -182,6 +188,9 @@ class FrameBuffer:
             out[f"raw/buttons/{k}"] = np.array([f.buttons.get(k, 0.0) for f in F], dtype=np.float32)
         for k in ("A", "B", "X", "Y"):
             out[f"raw/buttons/{k}"] = np.array([bool(f.buttons.get(k, False)) for f in F])
+        if any(f.axes for f in F):
+            for side in ("left", "right"):
+                out[f"raw/axes/{side}"] = np.array([f.axes.get(side, np.zeros(2)) for f in F], dtype=np.float32)
         if self.with_hands:
             for side in ("left", "right"):
                 h = np.zeros((T, 26, 7))

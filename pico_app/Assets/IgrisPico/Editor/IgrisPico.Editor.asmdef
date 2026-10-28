@@ -1,0 +1,28 @@
+{
+    "name": "IgrisPico.Editor",
+    "rootNamespace": "IgrisPico.Editor",
+    "references": [
+        "IgrisPico",
+        "Unity.XR.PICO",
+        "Unity.XR.Management",
+        "Unity.XR.Management.Editor",
+        "UnityEngine.SpatialTracking"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [
+        {
+            "name": "com.unity.xr.picoxr",
+            "expression": "3.0.0",
+            "define": "IGRIS_PICO"
+        }
+    ],
+    "noEngineReferences": false
+}

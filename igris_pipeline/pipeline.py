@@ -12,10 +12,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import h5py
 import numpy as np
 import yaml
 
-from .episode import Episode, list_episodes
+from .episode import Episode, _decode, list_episodes
 
 ROOT = Path(__file__).resolve().parents[1]
 CFG = ROOT / "configs"
@@ -53,11 +54,14 @@ def stage_correct(ep_path, profile=None, subject_height=None, profiles_cfg=None)
 
 
 # -- stage 2 ----------------------------------------------------------------------------
-def stage_label(ep_path, rules=None, learned_path=None, plot=True) -> list[dict]:
+def stage_label(ep_path, rules=None, learned_path=None, plot=True, overwrite_reviewed=False) -> list[dict]:
+    """Auto-label an episode. Human-reviewed labels are kept (and returned) unless overwrite_reviewed."""
     from .labeling.auto_label import LearnedLabeler, label_motion, write_labels
 
     ep_path = Path(ep_path)
     ep = Episode.load(ep_path)
+    if ep.group_attrs.get("labels", {}).get("reviewed") and not overwrite_reviewed:
+        return json.loads(ep.group_attrs["labels"].get("segments", "[]"))
     rules = rules or _yaml("labels.yaml")
     learned = LearnedLabeler.load(learned_path) if learned_path else None
     proc = ep.group_attrs.get("proc", {})
@@ -148,9 +152,11 @@ def run_session(session_dir, stages=("correct", "label", "retarget", "eval"), pr
             row["trackable_guess"] = r["verdict"]["trackable_guess"]
             row["flags"] = r["verdict"]["flags"]
             log(f"   MuJoCo: {r['verdict']}")
-        ep = Episode.load(p)
-        row["duration_s"] = round(float(ep["raw/t"][-1] - ep["raw/t"][0]), 2)
-        row.setdefault("profile", ep.group_attrs.get("proc", {}).get("profile", ep.attrs.get("tracker_profile")))
+        with h5py.File(p, "r") as f:  # only raw/t and two attrs are needed, not a full Episode.load
+            t = f["raw/t"]
+            row["duration_s"] = round(float(t[-1] - t[0]), 2)
+            prof = f["proc"].attrs.get("profile") if "proc" in f else None
+            row.setdefault("profile", _decode(prof if prof is not None else f.attrs.get("tracker_profile")))
         rows.append(row)
     manifest = {"session": session_dir.name, "episodes": rows}
     (session_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=1), encoding="utf-8")

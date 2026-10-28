@@ -31,6 +31,13 @@ def buffer_to_episode(buf: FrameBuffer, meta: dict) -> Episode:
     return ep
 
 
+def next_episode_index(out_dir: str | Path) -> int:
+    """Next free number after the highest existing ep_NNNN.h5 (a file count would collide after deletions)."""
+    out_dir = Path(out_dir)
+    nums = [int(p.stem[3:]) for p in out_dir.glob("ep_*.h5") if p.stem[3:].isdigit()] if out_dir.exists() else []
+    return max(nums) + 1 if nums else 0
+
+
 def record(source, out_dir: str | Path, meta: dict, max_seconds: float | None = None,
            use_buttons: bool = True, autostart: bool = False, with_hands: bool = False,
            on_status=print) -> list[Path]:
@@ -45,7 +52,7 @@ def record(source, out_dir: str | Path, meta: dict, max_seconds: float | None = 
     recording = autostart or not use_buttons
     prev = {"A": False, "B": False}
     t_start = time.time()
-    ep_idx = len(list(out_dir.glob("*.h5"))) if out_dir.exists() else 0
+    ep_idx = next_episode_index(out_dir)
 
     def flush():
         nonlocal buf, ep_idx

@@ -1,0 +1,23 @@
+{
+    "name": "IgrisPico",
+    "rootNamespace": "IgrisPico",
+    "references": [
+        "Unity.XR.PICO",
+        "UnityEngine.SpatialTracking"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [
+        {
+            "name": "com.unity.xr.picoxr",
+            "expression": "3.0.0",
+            "define": "IGRIS_PICO"
+        }
+    ],
+    "noEngineReferences": false
+}

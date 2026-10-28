@@ -22,6 +22,7 @@ ap.add_argument("--export-review", default=None)
 ap.add_argument("--import-review", default=None)
 ap.add_argument("--train", default=None, help="train LearnedLabeler on reviewed episodes, save to this path")
 ap.add_argument("--with-synthetic", action="store_true", help="add synthetic clips to the training set")
+ap.add_argument("--overwrite-reviewed", action="store_true", help="also re-label episodes whose labels were reviewed")
 a = ap.parse_args()
 paths = _common.episode_paths(a.paths)
 with open(_common.ROOT / "configs" / "labels.yaml", encoding="utf-8") as f:
@@ -32,9 +33,10 @@ if a.train:
     eps = [e for e in eps if e.group_attrs.get("labels", {}).get("reviewed")]
     syn = []
     if a.with_synthetic:
-        from igris_pipeline.pico.synthetic import generate
+        from igris_pipeline.pico.synthetic import generate, random_program
 
-        syn = [generate(fps=50, seed=s, subject_scale=sc) for s, sc in ((0, 1.0), (1, 0.92), (2, 1.08))]
+        # generate()'s seed does not change the motion; vary the program per clip
+        syn = [generate(random_program(s), fps=50, subject_scale=sc) for s, sc in ((0, 1.0), (1, 0.92), (2, 1.08))]
     print(f"training on {len(eps)} reviewed episodes + {len(syn)} synthetic clips")
     Path(a.train).parent.mkdir(parents=True, exist_ok=True)
     review.train_learned(eps, syn, a.train)
@@ -50,7 +52,7 @@ elif a.export_review:
     print("wrote", a.export_review)
 else:
     for p in paths:
-        segs = stage_label(p, rules, a.learned)
+        segs = stage_label(p, rules, a.learned, overwrite_reviewed=a.overwrite_reviewed)
         print(f"{p}: {len(segs)} segments")
         for s in segs:
             flag = "  <- review" if s["needs_review"] else ""

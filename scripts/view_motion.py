@@ -1,7 +1,7 @@
 """리타겟된 IGRIS-C 모션 보기 / 렌더링.
 
     python scripts/view_motion.py data/s01/motions/ep_0000.npz                 # 인터랙티브 뷰어
-    python scripts/view_motion.py data/s01/raw/ep_0000.h5 --mp4 out.mp4        # 동영상 (ffmpeg 필요)
+    python scripts/view_motion.py data/s01/raw/ep_0000.h5 --mp4 out.mp4        # 동영상 (PATH의 ffmpeg, 없으면 imageio-ffmpeg)
     python scripts/view_motion.py data/s01/raw/ep_0000.h5 --sheet out.png --times 2 10 14 17 23 34
 With an episode (.h5) the corrected human skeleton is drawn next to the robot (offset in +Y).
 """
@@ -34,6 +34,9 @@ if a.path.endswith(".h5"):
     human = ep["proc/body/pos"]
 robot = IgrisModel()
 m, d = robot.model, robot.data
+# the offscreen framebuffer must be at least the render size (MJCF default 640x480)
+m.vis.global_.offwidth = max(m.vis.global_.offwidth, a.width)
+m.vis.global_.offheight = max(m.vis.global_.offheight, a.height)
 
 
 def add_skeleton(scn, t):
@@ -84,8 +87,14 @@ if a.sheet or a.mp4:
         plt.imsave(a.sheet, sheet)
         print("wrote", a.sheet)
     if a.mp4:
+        import shutil
         import subprocess
-        proc = subprocess.Popen(["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
+
+        ffmpeg = shutil.which("ffmpeg")
+        if ffmpeg is None:  # fall back to the binary bundled with imageio-ffmpeg (requirements.txt)
+            import imageio_ffmpeg
+            ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        proc = subprocess.Popen([ffmpeg, "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
                                  "-s", f"{a.width}x{a.height}", "-r", str(fps), "-i", "-", "-pix_fmt", "yuv420p",
                                  a.mp4], stdin=subprocess.PIPE)
         for t in range(len(qpos)):
@@ -94,7 +103,8 @@ if a.sheet or a.mp4:
             add_skeleton(r.scene, t)
             proc.stdin.write(r.render().tobytes())
         proc.stdin.close()
-        proc.wait()
+        if proc.wait() != 0:
+            raise SystemExit(f"ffmpeg failed (exit {proc.returncode}); {a.mp4} not written")
         print("wrote", a.mp4)
 else:
     import mujoco.viewer

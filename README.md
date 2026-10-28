@@ -9,6 +9,7 @@ PICO 4 VR 헤드셋 + 모션 트래커로 사람 동작을 수집해, 로브로�
 [2]   자동 라벨링          ─ 이동(loco) / 하체(lower) / 상체(upper) 3축 라벨 + 검수 도구 ─> labels/*
 [3]   IGRIS-C 리타겟팅     ─ mink 2단계 IK (Robros GMR 테이블 기반) + 균형/접지 ─> motions/*.npz|pkl|csv
 [4]   평가                 ─ MuJoCo 물리 타당성 / Isaac Lab 모션 트래킹 RL / MuJoCo sim2sim
+[5]   시뮬레이션 텔레오퍼레이션 ─ 실시간 보정·리타게팅 + MuJoCo 가상 환경(물체 잡기) + 녹화 ─> data/<session>/raw/*.h5
 ```
 
 ## 0. 설치
@@ -19,9 +20,12 @@ PICO 4 VR 헤드셋 + 모션 트래커로 사람 동작을 수집해, 로브로�
 | Isaac Lab 학습/평가 | conda `isaaclab` (Python 3.11) | Isaac Sim 5.1 + Isaac Lab 2.3.2 (`C:\IsaacLab`) |
 
 ```powershell
-C:\Users\c\AppData\Local\Programs\Python\Python310\python.exe -m venv .venv
+& "$env:LOCALAPPDATA\Programs\Python\Python310\python.exe" -m venv .venv   # python.org Python 3.10
 .venv\Scripts\python -m pip install -r requirements.txt
 ```
+
+> `.venv`는 python.org에서 받은 Python 3.10으로 만듭니다. Miniconda/Anaconda의 Python으로 만들면 그 폴더에 있는
+> 오래된 `msvcp140.dll`(14.27)이 먼저 로드되어 `import mujoco`가 `WinError 1114`(DLL 초기화 실패)로 실패합니다.
 
 외부 자산은 이 저장소에 포함하지 않습니다.
 `.venv\Scripts\python scripts\fetch_third_party.py`를 실행하면 검증된 커밋으로 `third_party/`에 clone 됩니다.
@@ -35,25 +39,87 @@ C:\Users\c\AppData\Local\Programs\Python\Python310\python.exe -m venv .venv
 > 같은 역할(GPU 병렬 RL)은 Isaac Lab이 대신합니다. Isaac Lab 3.0 / Isaac Sim 6.x는 Windows 11 이상만
 > 지원하므로 현재 설치된 Isaac Lab 2.3.2 / Isaac Sim 5.1을 그대로 씁니다.
 
-## 1-1. PICO 4 연결과 장비·트래커 감지
+## 1-1. PICO 4 / 4 Ultra 연결과 장비·트래커 감지
 
-**연결 방법 (XRoboToolkit)**
+**연결 구성 (XRoboToolkit)**
 
-1. PC: `XRoboToolkit-PC-Service` Windows 빌드를 받아 압축을 풉니다.
-   - `VC_redist.x64.exe`를 설치합니다.
-   - `install.bat`를 관리자 권한으로 실행합니다(방화벽 규칙 추가).
-   - `runService.bat`로 서비스를 실행합니다.
-2. 헤드셋: `XRoboToolkit-PICO-1.1.1-SDK29.apk`를 `adb install`로 설치합니다(PICO 4 / Android API 29용).
-   - 앱에서 PC IP를 입력합니다(헤드셋 → PC TCP 63901).
-   - 바디 트래킹을 쓰려면 Motion Tracker를 **Full body**로 설정합니다.
+```
+헤드셋 XRoboToolkit 앱 ──TCP 63901──> PC RoboticsServiceProcess.exe ──127.0.0.1:60061──> xrobotoolkit_sdk (01_probe / 02_record)
+```
+
+| 포트 (`setting.ini`) | 용도 |
+|---|---|
+| TCP 63901 | 헤드셋 → PC 데이터. 방화벽 인바운드 허용 필요 |
+| UDP 29888 | PC 브로드캐스트. 같은 서브넷일 때만 헤드셋에 서버 선택 팝업이 뜸 |
+| TCP 127.0.0.1:60061 | 서비스 ↔ Python SDK (로컬 전용) |
+
+**PC: XRoboToolkit-PC-Service**
+
+1. [Releases](https://github.com/XR-Robotics/XRoboToolkit-PC-Service/releases) v1.0.0의 `XRoboToolkit-PC-Service.win.zip`을 전용 폴더에 풉니다(zip 안에 상위 폴더가 없음).
+2. `VC_redist.x64.exe`를 설치합니다.
+   `0x80070666`(다른 버전이 이미 설치됨)이 나오면 더 새 VC++ 2015-2022 런타임이 있는 것이므로 건너뜁니다.
+3. 관리자 PowerShell에서 압축을 푼 폴더로 이동해 `install.bat`를 실행하고, 방화벽 규칙을 전체 경로로 다시 추가합니다.
+   - 탐색기에서 "관리자 권한으로 실행"하면 작업 폴더가 `C:\Windows\System32`가 되어 `setting.ini`·`db` 처리가 엉뚱한 곳에 적용됩니다.
+   - 스크립트의 `%CUR_DIR%`가 설정되지 않아 방화벽 규칙(`picobusinesssuit`)이 상대 경로로 등록됩니다.
+     이 규칙을 지우고 같은 이름으로 다시 추가합니다. 이름이 같아야 `uninstallScript.bat`가 함께 지웁니다.
+
+   ```powershell
+   cd <압축 푼 폴더>
+   .\install.bat
+   netsh advfirewall firewall delete rule name="picobusinesssuit"
+   netsh advfirewall firewall add rule name="picobusinesssuit" dir=in action=allow program="<압축 푼 폴더>\RoboticsServiceProcess.exe" enable=yes profile=any
+   ```
+4. `runService.bat`로 서비스를 실행합니다(창 없이 백그라운드, 한 번에 하나만 실행).
+   - `netstat -ano | findstr "63901 60061"`에서 두 포트가 LISTENING이면 정상입니다.
+   - 서비스 로그는 `%LOCALAPPDATA%\PICOBusinessSuitData\log\<서비스를 시작한 날짜>.txt`에 남습니다(PowerShell에서는 `$env:LOCALAPPDATA`).
+     서비스를 다시 시작하기 전까지 같은 파일에 이어서 기록되므로 오늘 날짜 파일이 없을 수 있습니다.
+     헤드셋 접속은 `new tcp connect device`, 끊김은 `remove tcp`로 기록됩니다.
+
+Qt는 설치하지 않아도 됩니다. 릴리스 zip에 Qt 런타임 DLL이 들어 있고, Qt 설치는 서비스를 소스에서 빌드할 때만 필요합니다.
+
+**헤드셋: XRoboToolkit 앱**
+
+1. 헤드셋에서 개발자 모드와 USB 디버깅을 켭니다(설정 → 일반 → 정보 → 소프트웨어 버전을 여러 번 탭).
+   PC에는 Android Platform-Tools(`adb`)를 설치하고 PATH에 추가합니다.
+   USB로 처음 연결하면 헤드셋에 뜨는 USB 디버깅 허용 창을 수락합니다. `adb devices`에서 `unauthorized`가 아니라 `device`로 보여야 합니다.
+2. 기종에 맞는 APK를 [Releases](https://github.com/XR-Robotics/XRoboToolkit-Unity-Client/releases) v1.1.1에서 받아 설치합니다.
+   기종은 `adb shell getprop ro.product.model`로 확인합니다.
+
+   | 기종 | Android | APK |
+   |---|---|---|
+   | PICO 4 | 10 (API 29) | `XRoboToolkit-PICO-1.1.1-SDK29.apk` (일반 빌드는 설치되지 않음) |
+   | PICO 4 Ultra (`A9210`) | 14 (API 34) | `XRoboToolkit-PICO-1.1.1.apk` (SDK29 빌드도 설치·스트리밍 확인) |
+
+   ```powershell
+   adb install -r -g XRoboToolkit-PICO-1.1.1-SDK29.apk   # PICO 4
+   adb install -r -g XRoboToolkit-PICO-1.1.1.apk         # PICO 4 Ultra
+   ```
+3. 라이브러리 → 알 수 없는 출처에서 실행합니다.
+   처음 실행할 때는 헤드셋이 인터넷에 연결되어 있어야 합니다(없으면 "No entitlement info").
+4. **Network → Enter**에 PC IP를 입력하고 Status가 **WORKING**이 되는지 확인합니다.
+   PC와 헤드셋이 다른 서브넷이면 서버 선택 팝업이 뜨지 않으므로 직접 입력합니다. TCP 연결은 라우터를 넘어서도 됩니다.
+5. 트래킹 설정:
+   - Head, Controller를 켭니다.
+   - PICO Motion Tracker Mode: Full body(`body_*`) / Object(`sparse_trackers`) / None(`hmd_3pt`). Num은 착용한 트래커 수입니다.
    - **Send**를 켭니다.
-3. 모션 트래커 캘리브레이션: 헤드셋을 켤 때마다 PICO의 Motion Tracker 앱에서 다시 해야 합니다.
-4. 감지 실행:
+   - **Switch w/ A Button은 끕니다.** 켜 두면 A 버튼이 Send도 함께 토글합니다(`02_record.py`가 A를 녹화 시작/정지로 씀).
+6. 모션 트래커 캘리브레이션: 헤드셋을 켤 때마다 PICO의 Motion Tracker 앱에서 다시 해야 합니다.
+   - 캘리브레이션 없이 Full body를 고르면 바디 데이터가 나오지 않고, PC 연결이 끊긴 채 앱에는 WORKING이 그대로 표시될 수 있습니다.
+   - 이때 서비스 로그에는 `remove tcp`, 헤드셋 logcat에는 `mode is BodyTracking, but StateCode = 0`이 남습니다.
+   - 캘리브레이션을 마친 뒤 앱에서 **Reconnect**를 누릅니다.
+7. 감지 실행. 아래 명령은 PowerShell 기준이며, cmd에서는 `#` 이후 주석을 빼고 실행합니다.
 
 ```powershell
-.venv\Scripts\python scripts\01_probe_device.py                  # 실기
+.venv\Scripts\python scripts\01_probe_device.py --body-trackers 2     # 실기 (Full body, 발목 트래커 2개)
+.venv\Scripts\python scripts\01_probe_device.py --body-trackers 3     # 실기 (Full body, 발목 2개 + 허리 1개)
 .venv\Scripts\python scripts\01_probe_device.py --simulate body_2trk   # 헤드셋 없이 시험
 ```
+
+`--body-trackers`는 Full body 모드에서만 쓰입니다. Object / None 모드에서는 무시됩니다.
+
+`No packets received`가 나오면 다음 순서로 확인합니다.
+서비스 실행 → 방화벽 TCP 63901 → 앱 Status WORKING(서비스 로그에 `new tcp connect device`) → Send 켜짐 → (Full body이면) 트래커 캘리브레이션.
+앱의 WORKING 표시는 연결이 끊겨도 남아 있을 수 있으므로 서비스 로그로 확인합니다.
 
 **감지 항목과 한계** (`igris_pipeline/pico/device_probe.py`)
 
@@ -83,6 +149,12 @@ PICO 바디 트래킹은 **보정된 트래커가 최소 2개** 있어야 동작
 ```powershell
 .venv\Scripts\python scripts\02_record.py --session s01 --subject-height 1.72   # 오른손 A: 시작/정지, B: 마커
 ```
+
+- Full body에서 허리 트래커를 착용했다면 `02_record.py`에도 `--body-trackers 3`을 줍니다. `01_probe_device.py`의 설정은 이어지지 않습니다.
+- A/B 버튼은 PC의 `02_record.py`가 읽습니다. 상태(`[rec] recording ...`, `[rec] stopped`, `[rec] saved ...`)는 PC 터미널에만 표시되고 헤드셋에는 표시되지 않습니다.
+  10프레임 이하인 에피소드는 저장하지 않으므로 `[rec] stopped` 바로 앞에 `[rec] saved ...`가 없으면 버려진 것입니다. 세션은 Ctrl+C로 끝냅니다.
+- 앱의 Data Collection → **Record**는 헤드셋 내부(`/sdcard/Download/trackingData_*.txt`)에 따로 저장하는 기능이며 이 파이프라인에서는 쓰지 않습니다.
+  같은 Record 버튼을 다시 누르면 정지합니다.
 
 권장 프로토콜: 매 에피소드 시작 시 **3초간 정면 T-포즈로 정지**합니다(캘리브레이션 창).
 `hmd_3pt`와 `sparse_trackers`에는 키(`--subject-height`)가 꼭 필요합니다.
@@ -268,11 +340,76 @@ mkdir data\sample\motions -Force; copy data\demo_body2trk\motions\ep_0000.npz da
 .venv\Scripts\python scripts\eval_mujoco_policy.py --policy_dir <run>\exported --motion data\sample\motions\sim_body2trk_full.npz
 ```
 
+## 5. 시뮬레이션 텔레오퍼레이션 (PICO 4 Ultra 앱 + PC 서버)
+
+[Zero-HLM](https://young-bit.github.io/zero-hlm/)처럼 가상 환경에서 로봇을 원격 조작해 데이터를 모으기 위한 부분입니다.
+PC 서버(`igris_sim/`, `scripts/sim_server.py`)가 사람 동작을 실시간으로 IGRIS-C에 옮기고, MuJoCo 가상 환경에서 물체와 상호작용하게 합니다.
+PICO 4 Ultra 앱([pico_app/](pico_app/README.md))은 화면 표시와 입력을 맡습니다. 앱과의 통신 규격은 [docs/sim_protocol.md](docs/sim_protocol.md)에 있습니다.
+
+```
+PICO (XRoboToolkit 또는 PICO 앱) ─UDP─> 스트리밍 보정 ─> 스트리밍 리타게팅 ─> MuJoCo 씬 ─UDP─> PICO 앱 (50 Hz)
+                                         (트래커 프로파일별)  (mink IK, 같은 표)   (물체, 잡기)    └─> 녹화 raw/* + sim/*
+```
+
+**동작 방식**
+- **보정**: 시작 후 3초간 가만히 서 있으면, 오프라인 1-2단계 코드(`correct_episode`)로 그 구간을 보정합니다.
+  바닥, 정면, 뼈 길이, 컨트롤러·트래커 오프셋을 구합니다. 이후 프레임은 같은 설정을 인과(causal) 필터로 처리합니다.
+  - 트래커 프로파일은 들어오는 데이터로 자동 선택됩니다(`body_2trk` / `body_3trk` / `sparse_trackers` / `hmd_3pt`).
+- **리타게팅**: 3단계와 같은 mink IK 표를 프레임마다 풉니다(직전 해에서 시작).
+  발 접지 정렬과 관절 속도 제한도 실시간으로 합니다.
+- **물리** (`configs/sim.yaml`의 `physics.mode`):
+  - `kinematic`: 로봇이 사람을 그대로 따라가고 물체만 시뮬레이션합니다. 벽은 통과합니다.
+  - `harness`: 관절 PD와 가상 하네스로 로봇도 물리 시뮬레이션합니다.
+- **상호작용**: 그립을 누르면 손바닥 10 cm 안의 물체를 잡습니다. 놓으면 그때의 속도로 떨어지거나 날아갑니다.
+- **이동**: 왼쪽 스틱으로 이동, 오른쪽 스틱으로 회전합니다. 실제로 걸은 동작에 더해집니다.
+- **녹화**: A로 시작·정지합니다. `raw/*`는 `02_record.py`와 같은 형식이라 `run_pipeline.py`로 다시 처리할 수 있습니다.
+  `sim/*`에는 로봇 상태, 물체 포즈, 잡기 상태, 이동 오프셋이 담깁니다.
+- **가상 환경**: `scenes/<name>/scene.json`(Unity와 같은 파일). 기본 맵은 세 가지입니다.
+  - `empty`: 빈 바닥, 거리 표시, 공
+  - `tabletop`: 책상, 집을 물건 4개, 쟁반, 바닥의 통
+  - `room`: 6 × 6 m 방, 작업대, 선반, 의자, 상자, 문
+
+```powershell
+.venv\Scripts\python scripts\sim_server.py --source xrt --scene tabletop --viewer                # XRoboToolkit 스트림 + 데스크톱 뷰어
+.venv\Scripts\python scripts\sim_server.py --source udp --scene room --record-dir data\sim01\raw  # PICO 앱 연결
+.venv\Scripts\python scripts\sim_server.py --source sim:body_2trk --viewer --show-human           # 헤드셋 없이 시험
+.venv\Scripts\python scripts\sim_server.py --source replay:data\s01\raw\ep_0000.h5 --viewer      # 녹화 재생
+.venv\Scripts\python scripts\sim_ctl.py cmd load_scene scene=room                                # 명령 보내기
+.venv\Scripts\python scripts\sim_ctl.py relay --source sim:body_2trk                             # 앱 대신 UDP로 트래킹 보내기
+```
+
+**성능** (i7-9700K, 합성 데이터, 50 Hz 기준 프레임당):
+
+| 프로파일 | 보정 | IK 평균 / p95 | 사람 관절 오차(루트 기준) |
+|---|---|---|---|
+| body_2trk | 3.2 ms | 9.6 / 16.6 ms | 4.6 cm |
+| body_3trk | 3.2 ms | 9.5 / 15.7 ms | 3.3 cm |
+| sparse_trackers | 6.4 ms | 9.6 / 18.1 ms | 2.8 cm |
+| hmd_3pt | 5.2 ms | 8.3 / 15.2 ms | 7.3 cm |
+
+물리 계산은 프레임당 약 1 ms입니다.
+실시간 보정은 인과 필터 때문에 20–45 ms 늦고, 정확도는 오프라인 처리보다 낮습니다. 녹화 데이터는 오프라인으로 다시 처리하세요.
+
+**PICO 4 Ultra 앱** ([pico_app/](pico_app/README.md), Unity 2022.3 + PICO SDK 3.4)
+- 헤드셋, 컨트롤러, 모션 트래커(바디 / 오브젝트 모드) 값을 `tracking`으로 보냅니다.
+- 서버가 보내는 로봇, 씬, 물체를 표시합니다. 시점은 로봇 머리(1인칭) 또는 로봇 뒤에서 보기 중에서 고릅니다.
+- 메뉴에서 씬, 물리 모드, 트래커 모드, 녹화, 다시 보정을 다룹니다.
+- 서버는 같은 네트워크에서 자동으로 찾습니다. 로봇 모델과 씬은 접속할 때 서버의 HTTP에서 받으므로, 씬을 추가해도 앱을 다시 빌드하지 않아도 됩니다.
+- Unity가 필요 없는 부분(프로토콜, 좌표 변환, FK, 씬·메시 해석)은 `tests/test_app.py`가 C# 컴파일러로 검증합니다.
+- 빌드 방법은 [pico_app/README.md](pico_app/README.md)에 있습니다.
+
+**다음 단계**
+- 씬 빌더(RealSense D435/D435i, 일반 카메라)
+  - 실제 공간을 촬영해 재구성(TSDF / 사진측량)합니다.
+  - 바닥 정렬과 스케일을 보정하고 물체를 분리합니다.
+  - 충돌용 볼록 분해를 거쳐 `scenes/<name>/scene.json`과 메시로 내보냅니다.
+
 ## 데이터 포맷
 
 에피소드 HDF5의 구조는 `igris_pipeline/episode.py` 상단 docstring에 있습니다.
 
 - 단계마다 그룹(`raw/`, `proc/`, `labels/`, `retarget/igris_c/`)을 추가하므로 어느 단계부터든 다시 처리할 수 있습니다.
+- 시뮬레이션 녹화에는 `sim/` 그룹이 더 있습니다(`igris_sim/recording.py` 참고).
 - 좌표계는 Z-up, +X 정면, 쿼터니언은 **wxyz**입니다.
 - PICO 원본(Y-up, xyzw)은 기저변환으로 옮깁니다. 정면을 보고 T-포즈를 하면 모든 관절이 항등이 됩니다.
 
