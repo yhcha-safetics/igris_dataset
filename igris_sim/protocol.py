@@ -18,10 +18,12 @@ from __future__ import annotations
 
 import functools
 import http.server
+import io
 import json
 import socket
 import threading
 import time
+import urllib.parse
 from pathlib import Path
 
 import numpy as np
@@ -32,6 +34,7 @@ from .scene import SCENES_DIR
 
 VERSION = 1
 MAX_DATAGRAM = 65507
+ROBOT_ASSETS = "_robot/"  # asset server folder of the robot description (igris_sim.robot_export)
 BUTTONS = ("A", "B", "X", "Y", "left_trigger", "right_trigger", "left_grip", "right_grip", "left_menu", "right_menu")
 
 
@@ -201,14 +204,21 @@ class Hub:
 
 
 class AssetServer:
-    """Read-only HTTP server for scene files (meshes, textures) under `folder`, in a daemon thread."""
+    """Read-only HTTP server for scene files (meshes, textures) under `folder`, in a daemon thread.
+
+    Generated files (the robot description, ROBOT_ASSETS) are served from memory with add_files().
+    """
 
     def __init__(self, port: int, folder: Path = SCENES_DIR, host: str = "0.0.0.0"):
         handler = functools.partial(_QuietHandler, directory=str(folder))
         self.httpd = http.server.ThreadingHTTPServer((host, port), handler)
+        self.httpd.files = {}
         self.port = self.httpd.server_address[1]
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
         self.thread.start()
+
+    def add_files(self, files: dict[str, bytes], prefix: str = ""):
+        self.httpd.files = {**self.httpd.files, **{prefix + k: v for k, v in files.items()}}
 
     def close(self):
         self.httpd.shutdown()
@@ -218,6 +228,17 @@ class AssetServer:
 class _QuietHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, *args):
         pass
+
+    def send_head(self):
+        path = urllib.parse.unquote(urllib.parse.urlsplit(self.path).path).lstrip("/")
+        data = self.server.files.get(path)
+        if data is None:
+            return super().send_head()
+        self.send_response(200)
+        self.send_header("Content-Type", self.guess_type(path))
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        return io.BytesIO(data)
 
     def do_PUT(self):  # read-only
         self.send_error(405)

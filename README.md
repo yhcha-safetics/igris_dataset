@@ -344,7 +344,7 @@ mkdir data\sample\motions -Force; copy data\demo_body2trk\motions\ep_0000.npz da
 
 [Zero-HLM](https://young-bit.github.io/zero-hlm/)처럼 가상 환경에서 로봇을 원격 조작해 데이터를 모으기 위한 부분입니다.
 PC 서버(`igris_sim/`, `scripts/sim_server.py`)가 사람 동작을 실시간으로 IGRIS-C에 옮기고, MuJoCo 가상 환경에서 물체와 상호작용하게 합니다.
-PICO 4 Ultra 앱은 화면 표시와 입력을 맡습니다. 앱과의 통신 규격은 [docs/sim_protocol.md](docs/sim_protocol.md)에 있습니다.
+PICO 4 Ultra 앱([pico_app/](pico_app/README.md))은 화면 표시와 입력을 맡습니다. 앱과의 통신 규격은 [docs/sim_protocol.md](docs/sim_protocol.md)에 있습니다.
 
 ```
 PICO (XRoboToolkit 또는 PICO 앱) ─UDP─> 스트리밍 보정 ─> 스트리밍 리타게팅 ─> MuJoCo 씬 ─UDP─> PICO 앱 (50 Hz)
@@ -390,10 +390,15 @@ PICO (XRoboToolkit 또는 PICO 앱) ─UDP─> 스트리밍 보정 ─> 스트�
 물리 계산은 프레임당 약 1 ms입니다.
 실시간 보정은 인과 필터 때문에 20–45 ms 늦고, 정확도는 오프라인 처리보다 낮습니다. 녹화 데이터는 오프라인으로 다시 처리하세요.
 
+**PICO 4 Ultra 앱** ([pico_app/](pico_app/README.md), Unity 2022.3 + PICO SDK 3.4)
+- 헤드셋, 컨트롤러, 모션 트래커(바디 / 오브젝트 모드) 값을 `tracking`으로 보냅니다.
+- 서버가 보내는 로봇, 씬, 물체를 표시합니다. 시점은 로봇 머리(1인칭) 또는 로봇 뒤에서 보기 중에서 고릅니다.
+- 메뉴에서 씬, 물리 모드, 트래커 모드, 녹화, 다시 보정을 다룹니다.
+- 서버는 같은 네트워크에서 자동으로 찾습니다. 로봇 모델과 씬은 접속할 때 서버의 HTTP에서 받으므로, 씬을 추가해도 앱을 다시 빌드하지 않아도 됩니다.
+- Unity가 필요 없는 부분(프로토콜, 좌표 변환, FK, 씬·메시 해석)은 `tests/test_app.py`가 C# 컴파일러로 검증합니다.
+- 빌드 방법은 [pico_app/README.md](pico_app/README.md)에 있습니다.
+
 **다음 단계**
-- PICO 4 Ultra 앱(Unity 2022.3 + PICO SDK)
-  - 씬과 로봇 렌더링, 트래킹 송신, 메뉴(씬 선택·모드·녹화).
-  - 디스크 여유 공간(~40 GB)과 Unity 2022.3 + Android 모듈 설치가 먼저 필요합니다.
 - 씬 빌더(RealSense D435/D435i, 일반 카메라)
   - 실제 공간을 촬영해 재구성(TSDF / 사진측량)합니다.
   - 바닥 정렬과 스케일을 보정하고 물체를 분리합니다.

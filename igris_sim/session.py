@@ -33,8 +33,9 @@ from igris_pipeline.retarget.ik_config import load as load_ik_config
 from igris_pipeline.retarget.robot import ROOT
 from igris_pipeline.utils.rotations import yaw_of, yaw_quat
 
+from .protocol import ROBOT_ASSETS
 from .recording import SimRecorder
-from .scene import list_scenes, load_scene
+from .scene import SCENES_DIR, list_scenes, load_scene
 from .streaming import CalibrationError, StreamingCorrector, StreamingRetargeter, _rot_z
 from .world import SimWorld
 
@@ -372,10 +373,14 @@ class SimSession:
 
     def scene_message(self, asset_base: str | None = None) -> dict:
         w = self.world
-        return {"v": PROTOCOL_VERSION, "type": "scene", "name": w.scene.name, "spec": w.scene.spec,
+        try:  # scene files (meshes) are served from scenes/: <assets><folder>/<file>
+            folder = w.scene.folder.resolve().relative_to(SCENES_DIR.resolve()).as_posix()
+        except ValueError:
+            folder = None
+        return {"v": PROTOCOL_VERSION, "type": "scene", "name": w.scene.name, "folder": folder, "spec": w.scene.spec,
                 "dynamic": w.dynamic, "joint_names": list(w.robot.joint_names),
                 "robot_mjcf": str(Path(w.robot.path).relative_to(ROOT)).replace("\\", "/"),
-                "assets": asset_base, "rate_hz": self.fps}
+                "robot": ROBOT_ASSETS + "robot.json", "assets": asset_base, "rate_hz": self.fps}
 
     def close(self):
         if self.recorder is not None and self.recorder.active:

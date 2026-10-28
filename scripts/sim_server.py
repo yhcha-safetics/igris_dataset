@@ -16,7 +16,8 @@ import time
 import _common  # noqa: F401
 import numpy as np
 
-from igris_sim.protocol import AssetServer, Hub, local_ip
+from igris_sim.protocol import ROBOT_ASSETS, AssetServer, Hub, local_ip
+from igris_sim.robot_export import robot_description
 from igris_sim.session import SimSession, load_sim_config, summary_line
 from igris_sim.sources import PacedSource, make_source
 from igris_sim.streaming import _rot_z
@@ -59,6 +60,7 @@ asset_base = None
 if not a.no_network:
     hub = Hub(a.port or int(net.get("port", 9870)), client_timeout=float(net.get("client_timeout_s", 3.0)))
     assets = AssetServer(a.asset_port or int(net.get("asset_port", 9871)))
+    assets.add_files(robot_description(session.world)[1], ROBOT_ASSETS)  # the robot is the same in every scene
     asset_base = f"http://{local_ip()}:{assets.port}/"
     print(f"listening on UDP {local_ip()}:{hub.port}, scene assets at {asset_base}")
 
@@ -119,7 +121,8 @@ try:
             for msg, addr in cmds:
                 reply = session.command(msg)
                 if reply.get("type") == "scene":
-                    reply["assets"] = asset_base
+                    # the app may prefer http://<address it reached the server at>:asset_port/
+                    reply["assets"], reply["asset_port"] = asset_base, assets.port
                 hub.send(reply, addr)
         # 2) simulation + state out
         now = t_sim if a.offline and t_sim is not None else time.time()

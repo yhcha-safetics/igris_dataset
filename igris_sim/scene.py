@@ -23,7 +23,8 @@
         size     box [sx, sy, sz] full extents; sphere [r]; cylinder / capsule [r, height]
         file     mesh only: OBJ / STL for MuJoCo, relative to the scene folder
         collision  mesh only: convex parts used for contacts (default: `file`, convexified)
-        render   mesh only: textured model for the app (e.g. .glb); MuJoCo ignores it
+        render   mesh only: display model for the app (OBJ, vertex colours "v x y z r g b" allowed,
+                 or STL; default `file`); MuJoCo ignores it
         scale    mesh only: [sx, sy, sz]
         pos, rot, rgba, friction, collide   override the object's
 
