@@ -1,0 +1,33 @@
+# PC simulation server (igris_sim, scripts/sim_server.py):
+# PICO tracking -> streaming correction / retargeting -> MuJoCo scene -> state to the PICO app.
+
+rate_hz: 50                 # control / state rate; corrected skeleton and IK run once per tick
+
+calibration:
+  duration_s: 3.0           # stand still this long after the start (or a recalibration)
+  max_still_speed: 0.4      # m/s, peak mean joint speed of the corrected skeleton in the still window
+  recalibrate_hold_s: 1.0   # hold Y this long to recalibrate
+
+physics:
+  mode: kinematic           # kinematic | harness (see igris_sim/world.py)
+  solver_iterations: 50     # the MJCF's 500 iterations + 100 noslip are tuned for offline accuracy
+  noslip_iterations: 0
+  harness: {kp: 3000.0, kd: 300.0, gain_scale: 4.0}
+
+grasp:
+  radius: 0.10              # m between the palm collider and the object surface
+  grip_on: 0.6              # controller grip value that starts a grasp
+  grip_off: 0.4             # ... and releases it
+
+locomotion:                 # thumbstick locomotion on top of the tracked motion
+  max_speed: 1.0            # m/s at full left-stick deflection, relative to the head direction
+  turn_rate_deg: 90.0       # deg/s at full right-stick x deflection (turns about the pelvis)
+  deadzone: 0.15
+
+network:
+  port: 9870                # UDP: tracking + commands in, state out (docs/sim_protocol.md)
+  asset_port: 9871          # HTTP: read-only scene files for the app (scenes/)
+  client_timeout_s: 3.0     # a client that sent nothing for this long stops receiving state
+
+recording:
+  min_frames: 10            # shorter episodes are discarded (as in 02_record.py)

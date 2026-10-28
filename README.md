@@ -9,6 +9,7 @@ PICO 4 VR 헤드셋 + 모션 트래커로 사람 동작을 수집해, 로브로�
 [2]   자동 라벨링          ─ 이동(loco) / 하체(lower) / 상체(upper) 3축 라벨 + 검수 도구 ─> labels/*
 [3]   IGRIS-C 리타겟팅     ─ mink 2단계 IK (Robros GMR 테이블 기반) + 균형/접지 ─> motions/*.npz|pkl|csv
 [4]   평가                 ─ MuJoCo 물리 타당성 / Isaac Lab 모션 트래킹 RL / MuJoCo sim2sim
+[5]   시뮬레이션 텔레오퍼레이션 ─ 실시간 보정·리타게팅 + MuJoCo 가상 환경(물체 잡기) + 녹화 ─> data/<session>/raw/*.h5
 ```
 
 ## 0. 설치
@@ -339,11 +340,71 @@ mkdir data\sample\motions -Force; copy data\demo_body2trk\motions\ep_0000.npz da
 .venv\Scripts\python scripts\eval_mujoco_policy.py --policy_dir <run>\exported --motion data\sample\motions\sim_body2trk_full.npz
 ```
 
+## 5. 시뮬레이션 텔레오퍼레이션 (PICO 4 Ultra 앱 + PC 서버)
+
+[Zero-HLM](https://young-bit.github.io/zero-hlm/)처럼 가상 환경에서 로봇을 원격 조작해 데이터를 모으기 위한 부분입니다.
+PC 서버(`igris_sim/`, `scripts/sim_server.py`)가 사람 동작을 실시간으로 IGRIS-C에 옮기고, MuJoCo 가상 환경에서 물체와 상호작용하게 합니다.
+PICO 4 Ultra 앱은 화면 표시와 입력을 맡습니다. 앱과의 통신 규격은 [docs/sim_protocol.md](docs/sim_protocol.md)에 있습니다.
+
+```
+PICO (XRoboToolkit 또는 PICO 앱) ─UDP─> 스트리밍 보정 ─> 스트리밍 리타게팅 ─> MuJoCo 씬 ─UDP─> PICO 앱 (50 Hz)
+                                         (트래커 프로파일별)  (mink IK, 같은 표)   (물체, 잡기)    └─> 녹화 raw/* + sim/*
+```
+
+**동작 방식**
+- **보정**: 시작 후 3초간 가만히 서 있으면, 오프라인 1-2단계 코드(`correct_episode`)로 그 구간을 보정합니다.
+  바닥, 정면, 뼈 길이, 컨트롤러·트래커 오프셋을 구합니다. 이후 프레임은 같은 설정을 인과(causal) 필터로 처리합니다.
+  - 트래커 프로파일은 들어오는 데이터로 자동 선택됩니다(`body_2trk` / `body_3trk` / `sparse_trackers` / `hmd_3pt`).
+- **리타게팅**: 3단계와 같은 mink IK 표를 프레임마다 풉니다(직전 해에서 시작).
+  발 접지 정렬과 관절 속도 제한도 실시간으로 합니다.
+- **물리** (`configs/sim.yaml`의 `physics.mode`):
+  - `kinematic`: 로봇이 사람을 그대로 따라가고 물체만 시뮬레이션합니다. 벽은 통과합니다.
+  - `harness`: 관절 PD와 가상 하네스로 로봇도 물리 시뮬레이션합니다.
+- **상호작용**: 그립을 누르면 손바닥 10 cm 안의 물체를 잡습니다. 놓으면 그때의 속도로 떨어지거나 날아갑니다.
+- **이동**: 왼쪽 스틱으로 이동, 오른쪽 스틱으로 회전합니다. 실제로 걸은 동작에 더해집니다.
+- **녹화**: A로 시작·정지합니다. `raw/*`는 `02_record.py`와 같은 형식이라 `run_pipeline.py`로 다시 처리할 수 있습니다.
+  `sim/*`에는 로봇 상태, 물체 포즈, 잡기 상태, 이동 오프셋이 담깁니다.
+- **가상 환경**: `scenes/<name>/scene.json`(Unity와 같은 파일). 기본 맵은 세 가지입니다.
+  - `empty`: 빈 바닥, 거리 표시, 공
+  - `tabletop`: 책상, 집을 물건 4개, 쟁반, 바닥의 통
+  - `room`: 6 × 6 m 방, 작업대, 선반, 의자, 상자, 문
+
+```powershell
+.venv\Scripts\python scripts\sim_server.py --source xrt --scene tabletop --viewer                # XRoboToolkit 스트림 + 데스크톱 뷰어
+.venv\Scripts\python scripts\sim_server.py --source udp --scene room --record-dir data\sim01\raw  # PICO 앱 연결
+.venv\Scripts\python scripts\sim_server.py --source sim:body_2trk --viewer --show-human           # 헤드셋 없이 시험
+.venv\Scripts\python scripts\sim_server.py --source replay:data\s01\raw\ep_0000.h5 --viewer      # 녹화 재생
+.venv\Scripts\python scripts\sim_ctl.py cmd load_scene scene=room                                # 명령 보내기
+.venv\Scripts\python scripts\sim_ctl.py relay --source sim:body_2trk                             # 앱 대신 UDP로 트래킹 보내기
+```
+
+**성능** (i7-9700K, 합성 데이터, 50 Hz 기준 프레임당):
+
+| 프로파일 | 보정 | IK 평균 / p95 | 사람 관절 오차(루트 기준) |
+|---|---|---|---|
+| body_2trk | 3.2 ms | 9.6 / 16.6 ms | 4.6 cm |
+| body_3trk | 3.2 ms | 9.5 / 15.7 ms | 3.3 cm |
+| sparse_trackers | 6.4 ms | 9.6 / 18.1 ms | 2.8 cm |
+| hmd_3pt | 5.2 ms | 8.3 / 15.2 ms | 7.3 cm |
+
+물리 계산은 프레임당 약 1 ms입니다.
+실시간 보정은 인과 필터 때문에 20–45 ms 늦고, 정확도는 오프라인 처리보다 낮습니다. 녹화 데이터는 오프라인으로 다시 처리하세요.
+
+**다음 단계**
+- PICO 4 Ultra 앱(Unity 2022.3 + PICO SDK)
+  - 씬과 로봇 렌더링, 트래킹 송신, 메뉴(씬 선택·모드·녹화).
+  - 디스크 여유 공간(~40 GB)과 Unity 2022.3 + Android 모듈 설치가 먼저 필요합니다.
+- 씬 빌더(RealSense D435/D435i, 일반 카메라)
+  - 실제 공간을 촬영해 재구성(TSDF / 사진측량)합니다.
+  - 바닥 정렬과 스케일을 보정하고 물체를 분리합니다.
+  - 충돌용 볼록 분해를 거쳐 `scenes/<name>/scene.json`과 메시로 내보냅니다.
+
 ## 데이터 포맷
 
 에피소드 HDF5의 구조는 `igris_pipeline/episode.py` 상단 docstring에 있습니다.
 
 - 단계마다 그룹(`raw/`, `proc/`, `labels/`, `retarget/igris_c/`)을 추가하므로 어느 단계부터든 다시 처리할 수 있습니다.
+- 시뮬레이션 녹화에는 `sim/` 그룹이 더 있습니다(`igris_sim/recording.py` 참고).
 - 좌표계는 Z-up, +X 정면, 쿼터니언은 **wxyz**입니다.
 - PICO 원본(Y-up, xyzw)은 기저변환으로 옮깁니다. 정면을 보고 T-포즈를 하면 모든 관절이 항등이 됩니다.
 

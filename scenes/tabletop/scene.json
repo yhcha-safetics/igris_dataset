@@ -1,0 +1,41 @@
+{
+  "format": "igris_scene",
+  "version": 1,
+  "name": "tabletop",
+  "description": "Table in front of the robot with small objects to pick and place, and a bin on the floor.",
+  "spawn": {"pos": [0.0, 0.0], "yaw_deg": 0},
+  "objects": [
+    {"name": "table", "pos": [0.8, 0.0, 0.0], "rgba": [0.55, 0.4, 0.28, 1.0], "friction": [1.0, 0.005, 0.0001],
+     "geoms": [
+       {"shape": "box", "size": [0.7, 1.2, 0.04], "pos": [0.0, 0.0, 0.73]},
+       {"shape": "box", "size": [0.05, 0.05, 0.71], "pos": [0.3, 0.55, 0.355]},
+       {"shape": "box", "size": [0.05, 0.05, 0.71], "pos": [0.3, -0.55, 0.355]},
+       {"shape": "box", "size": [0.05, 0.05, 0.71], "pos": [-0.3, 0.55, 0.355]},
+       {"shape": "box", "size": [0.05, 0.05, 0.71], "pos": [-0.3, -0.55, 0.355]}
+     ]},
+    {"name": "cube_red", "shape": "box", "size": [0.05, 0.05, 0.05], "pos": [0.55, 0.15, 0.776],
+     "dynamic": true, "mass": 0.1, "rgba": [0.9, 0.15, 0.15, 1.0]},
+    {"name": "cube_green", "shape": "box", "size": [0.05, 0.05, 0.05], "pos": [0.6, -0.1, 0.776],
+     "dynamic": true, "mass": 0.1, "rgba": [0.2, 0.75, 0.25, 1.0]},
+    {"name": "can_blue", "shape": "cylinder", "size": [0.033, 0.12], "pos": [0.65, 0.3, 0.811],
+     "dynamic": true, "mass": 0.25, "rgba": [0.15, 0.35, 0.9, 1.0]},
+    {"name": "ball_yellow", "shape": "sphere", "size": [0.035], "pos": [0.6, -0.3, 0.786],
+     "dynamic": true, "mass": 0.06, "rgba": [0.95, 0.85, 0.15, 1.0]},
+    {"name": "tray", "pos": [0.75, 0.0, 0.751], "dynamic": true, "mass": 0.4, "rgba": [0.3, 0.3, 0.32, 1.0],
+     "geoms": [
+       {"shape": "box", "size": [0.25, 0.35, 0.01], "pos": [0.0, 0.0, 0.0]},
+       {"shape": "box", "size": [0.25, 0.01, 0.04], "pos": [0.0, 0.17, 0.02]},
+       {"shape": "box", "size": [0.25, 0.01, 0.04], "pos": [0.0, -0.17, 0.02]},
+       {"shape": "box", "size": [0.01, 0.35, 0.04], "pos": [0.12, 0.0, 0.02]},
+       {"shape": "box", "size": [0.01, 0.35, 0.04], "pos": [-0.12, 0.0, 0.02]}
+     ]},
+    {"name": "bin", "pos": [0.35, -0.75, 0.0], "rgba": [0.25, 0.45, 0.35, 1.0],
+     "geoms": [
+       {"shape": "box", "size": [0.4, 0.4, 0.02], "pos": [0.0, 0.0, 0.01]},
+       {"shape": "box", "size": [0.4, 0.02, 0.3], "pos": [0.0, 0.19, 0.15]},
+       {"shape": "box", "size": [0.4, 0.02, 0.3], "pos": [0.0, -0.19, 0.15]},
+       {"shape": "box", "size": [0.02, 0.4, 0.3], "pos": [0.19, 0.0, 0.15]},
+       {"shape": "box", "size": [0.02, 0.4, 0.3], "pos": [-0.19, 0.0, 0.15]}
+     ]}
+  ]
+}
