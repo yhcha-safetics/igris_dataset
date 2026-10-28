@@ -112,22 +112,18 @@ class Retargeter:
 
     # ------------------------------------------------------------------------------------
     def scale_human(self, pos: np.ndarray, quat: np.ndarray, stature: float | None) -> np.ndarray:
+        return self.apply_scale(pos, self.scale_params(pos, stature))
+
+    def scale_params(self, pos: np.ndarray, stature: float | None) -> dict:
+        """Body-part scale factors from a (T,24,3) clip (also stored as self.scale_info).
+
+        A streaming caller computes them once on a calibration window and then applies them per
+        frame with apply_scale()."""
         sc = self.cfg.get("scaling", {})
-        mode = sc.get("mode", "kinematic")
-        root = J[self.cfg["robot"].get("human_root", "pelvis")]
-        if mode == "gmr":
+        if sc.get("mode", "kinematic") == "gmr":
             h = stature or sc.get("human_height_assumption", 1.8)
-            ratio = h / float(sc.get("human_height_assumption", 1.8))
-            table = sc.get("gmr_scale_table", {})
-            s_root = table.get("pelvis", 1.0) * ratio
-            out = pos.copy()
-            root_pos = pos[:, root] * s_root
-            for j in range(NUM_JOINTS):
-                s = table.get(PICO_JOINTS[j])
-                out[:, j] = root_pos + (pos[:, j] - pos[:, root]) * (s * ratio if s is not None else s_root)
-            out[:, root] = root_pos
-            self.scale_info = {"mode": "gmr", "ratio": ratio}
-            return out
+            self.scale_info = {"mode": "gmr", "ratio": h / float(sc.get("human_height_assumption", 1.8))}
+            return self.scale_info
         # kinematic scaling from segment-length ratios
         L = self.robot.segment_lengths()
         hum = np.median(np.stack([np.linalg.norm(pos[:, c] - pos[:, p], axis=-1) for p, c in BONES], -1), 0)
@@ -147,11 +143,28 @@ class Retargeter:
         human_shw = np.median(np.linalg.norm(pos[:, J["left_shoulder"]] - pos[:, J["right_shoulder"]], axis=-1))
         r = {"leg": robot_leg / human_leg, "arm": robot_arm / human_arm, "trunk": L["trunk"] / human_trunk,
              "hip_width": L["hip_width"] / human_hipw, "shoulder_width": L["shoulder_width"] / human_shw}
+        self.scale_info = {"mode": "kinematic", "ratios": {k: round(float(v), 4) for k, v in r.items()}}
+        return {"mode": "kinematic", "ratios": r}
+
+    def apply_scale(self, pos: np.ndarray, params: dict) -> np.ndarray:
+        """Scale a (T,24,3) human skeleton with scale_params() output."""
+        root = J[self.cfg["robot"].get("human_root", "pelvis")]
+        if params["mode"] == "gmr":
+            ratio = params["ratio"]
+            table = self.cfg.get("scaling", {}).get("gmr_scale_table", {})
+            s_root = table.get("pelvis", 1.0) * ratio
+            out = pos.copy()
+            root_pos = pos[:, root] * s_root
+            for j in range(NUM_JOINTS):
+                s = table.get(PICO_JOINTS[j])
+                out[:, j] = root_pos + (pos[:, j] - pos[:, root]) * (s * ratio if s is not None else s_root)
+            out[:, root] = root_pos
+            return out
+        r = params["ratios"]
         out = np.zeros_like(pos)
         out[:, root] = pos[:, root] * r["leg"]
         for p, c in BONES:  # BONES are in topological order
             out[:, c] = out[:, p] + r[_BONE_GROUP[c]] * (pos[:, c] - pos[:, p])
-        self.scale_info = {"mode": "kinematic", "ratios": {k: round(float(v), 4) for k, v in r.items()}}
         return out
 
     def _pin_contact_feet(self, spos, quat, contact, fps):

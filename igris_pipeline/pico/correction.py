@@ -223,21 +223,24 @@ class SparseBodySolver:
         self.L = lengths
         self.ankle_h = ankle_height
 
-    def solve(self, fps, head_pos, head_quat, wrist_pos, wrist_quat, floor_z, pelvis=None, ankles=None):
+    def solve(self, fps, head_pos, head_quat, wrist_pos, wrist_quat, floor_z, pelvis=None, ankles=None,
+              trunk_yaw=None, trunk_pitch=None):
+        """trunk_yaw / trunk_pitch (T,) override the zero-phase smoothed head-derived estimates
+        (a streaming caller passes causally filtered ones; see trunk_angles_from_head)."""
         T = head_pos.shape[0]
         L = self.L
         pos = np.zeros((T, NUM_JOINTS, 3))
         quat = np.zeros((T, NUM_JOINTS, 4))
         quat[..., 0] = 1.0
 
-        head_fwd = quat_apply(head_quat, np.array([1.0, 0, 0]))
-        head_yaw = np.unwrap(np.arctan2(head_fwd[:, 1], head_fwd[:, 0]))
-        trunk_yaw = lowpass(head_yaw, fps, 0.8)
+        head_yaw, head_pitch_raw = trunk_angles_from_head(head_quat)
+        if trunk_yaw is None:
+            trunk_yaw = lowpass(np.unwrap(head_yaw), fps, 0.8)
         if pelvis is not None:
             p_yaw = np.unwrap(yaw_of(pelvis[1]))
             trunk_yaw = p_yaw
-        head_pitch = np.arcsin(np.clip(-head_fwd[:, 2], -1, 1))  # + = looking down
-        trunk_pitch = lowpass(np.clip(0.6 * (head_pitch - np.deg2rad(20)), 0, np.deg2rad(80)), fps, 1.0)
+        if trunk_pitch is None:
+            trunk_pitch = lowpass(head_pitch_raw, fps, 1.0)
         q_trunk = quat_mul(yaw_quat(trunk_yaw), _quat_axis_angle(np.array([0, 1.0, 0]), trunk_pitch))
 
         pos[:, J["head"]], quat[:, J["head"]] = head_pos, head_quat
@@ -311,6 +314,18 @@ class SparseBodySolver:
             pos[:, ft] = end + quat_apply(aq, _rest_vec(L, f"{side}_ankle", f"{side}_foot"))
             quat[:, ft] = aq
         return pos, quat_normalize(quat)
+
+
+def trunk_angles_from_head(head_quat):
+    """Raw trunk heading (wrapped head yaw) and trunk pitch implied by the head pitch, (T,) each.
+
+    The trunk leans forward with 60 % of the head pitch beyond 20 deg (looking down), up to 80 deg.
+    SparseBodySolver low-passes both; streaming callers filter them causally instead.
+    """
+    head_fwd = quat_apply(head_quat, np.array([1.0, 0, 0]))
+    yaw = np.arctan2(head_fwd[..., 1], head_fwd[..., 0])
+    head_pitch = np.arcsin(np.clip(-head_fwd[..., 2], -1, 1))  # + = looking down
+    return yaw, np.clip(0.6 * (head_pitch - np.deg2rad(20)), 0, np.deg2rad(80))
 
 
 def _quat_axis_angle(axis, angle):
@@ -389,6 +404,9 @@ def correct_episode(ep: Episode, cfg_all: dict, profile: str | None = None,
 
     # 3) calibration ------------------------------------------------------------------
     calib: dict = {"profile": profile}
+    # numeric calibration state for a streaming corrector (igris_sim.streaming) that calibrates on
+    # a short still window with this function and then corrects frame by frame
+    stream: dict = {"ctrl_offsets": {}, "tracker_offsets": {}}
     if is_body:
         win, still_speed = _still_window([bp], fps, cfg["calibration"]["window_s"], cfg["calibration"]["search_s"])
         ank_z = np.minimum(bp[valid, J["left_ankle"], 2], bp[valid, J["right_ankle"], 2])
@@ -475,7 +493,9 @@ def correct_episode(ep: Episode, cfg_all: dict, profile: str | None = None,
         if trk:
             roles = _assign_tracker_roles(trk, win, ep, cfg)
             calib["tracker_roles"] = {str(k): r for k, r in roles.items()}
-            pelvis_in, ankles_in = _tracker_targets(trk, roles, win, head_q, floor_z)
+            pelvis_in, ankles_in, stream["tracker_offsets"] = _tracker_targets(trk, roles, win, head_q, floor_z)
+        stream["ctrl_offsets"] = {s: offs[f"ctrl_{s}"] for s in ("left", "right")}
+        stream["hmd_to_head"] = offs["hmd_to_head"]
         solver = SparseBodySolver(lengths)
         bp, bq = solver.solve(fps, head_p, head_q, wrist, wrist_q, floor_z, pelvis=pelvis_in, ankles=ankles_in)
         report["steps"].append({"sparse_solver": {"trackers": len(trk or []), "roles": calib.get("tracker_roles")}})
@@ -516,6 +536,7 @@ def correct_episode(ep: Episode, cfg_all: dict, profile: str | None = None,
                 wp = np.where(ok[:, None], wp, bp[:, wj])
                 err = np.linalg.norm(wp[ok] - bp[ok, wj], axis=-1)
                 targets[f"{s_}_arm"] = (wp, ok)
+                stream["ctrl_offsets"][s_] = (off_p, off_q)
                 calib[f"controller_to_wrist_{s_}"] = {"pos": off_p.round(4).tolist(),
                                                       "quat_wxyz": off_q.round(4).tolist()}
                 report["steps"].append({f"anchor_{s_}_hand": {
@@ -595,7 +616,9 @@ def correct_episode(ep: Episode, cfg_all: dict, profile: str | None = None,
         "proc/controller/right/pos": ctrl["right"][0], "proc/controller/right/quat": ctrl["right"][1],
     }
     calib["world_alignment"] = {"origin": origin.round(4).tolist(), "yaw_removed_deg": float(np.degrees(yaw0))}
-    return {"arrays": out, "calibration": calib, "report": report, "fps": fps,
+    stream.update({"origin": origin, "yaw0": float(yaw0), "lengths": np.asarray(lengths, float).copy(),
+                   "tracker_roles": roles if not is_body else {}})
+    return {"arrays": out, "calibration": calib, "report": report, "fps": fps, "stream": stream,
             "observed_axes": cfg.get("observed_axes", ["loco", "lower", "upper"])}
 
 
@@ -643,32 +666,53 @@ def _assign_tracker_roles(trk, win, ep, cfg):
     return roles
 
 
-def _tracker_targets(trk, roles, win, head_q, floor_z):
-    """Calibrate tracker->joint offsets from the still pose and return joint targets."""
-    pelvis_in, ankles = None, {}
+def tracker_offsets(trk, roles, win, head_q, floor_z) -> dict:
+    """Calibrate tracker->joint offsets from the still pose: {k: (role, pos_off, quat_off)}.
+
+    pos_off is in the tracker frame, quat_off maps the tracker orientation to the joint's.
+    """
+    out = {}
     for k, p, q, v in trk:
         role = roles.get(k)
         if role is None:
             continue
         q_rest = _mean_quat(q[win])
+        yaw_rest = yaw_quat(np.array(yaw_of(_mean_quat(head_q[win]))))
         if role in ("left_ankle", "right_ankle"):
             rest_joint = p[win].mean(0).copy()
             rest_joint[2] = floor_z + ANKLE_HEIGHT
             off = quat_apply(quat_conj(q_rest), rest_joint - p[win].mean(0))
-            joint_q_off = quat_mul(quat_conj(q_rest), yaw_quat(np.array(yaw_of(_mean_quat(head_q[win])))))
-            jq = quat_mul(q, np.broadcast_to(joint_q_off, q.shape))
-            ankles[role.split("_")[0]] = (p + quat_apply(q, np.broadcast_to(off, p.shape)), jq)
         elif role == "pelvis":
-            yaw_rest = yaw_quat(np.array(yaw_of(_mean_quat(head_q[win]))))
-            joint_q_off = quat_mul(quat_conj(q_rest), yaw_rest)
-            jq = quat_mul(q, np.broadcast_to(joint_q_off, q.shape))
             # belt tracker sits ~12 cm behind the pelvis joint
-            off_world = quat_apply(yaw_rest, np.array([0.12, 0.0, 0.0]))
-            off = quat_apply(quat_conj(q_rest), off_world)
-            pelvis_in = (p + quat_apply(q, np.broadcast_to(off, p.shape)), jq)
+            off = quat_apply(quat_conj(q_rest), quat_apply(yaw_rest, np.array([0.12, 0.0, 0.0])))
+        else:
+            continue
+        out[k] = (role, off, quat_mul(quat_conj(q_rest), yaw_rest))
+    return out
+
+
+def apply_tracker_offsets(offsets: dict, poses: dict):
+    """Joint targets from tracker poses {k: (pos (T,3), quat (T,4))} -> (pelvis_in, ankles)."""
+    pelvis_in, ankles = None, {}
+    for k, (role, off, q_off) in offsets.items():
+        if k not in poses:
+            continue
+        p, q = poses[k]
+        target = (p + quat_apply(q, np.broadcast_to(off, p.shape)), quat_mul(q, np.broadcast_to(q_off, q.shape)))
+        if role == "pelvis":
+            pelvis_in = target
+        else:
+            ankles[role.split("_")[0]] = target
     if len(ankles) < 2:
         ankles = None
     return pelvis_in, ankles
+
+
+def _tracker_targets(trk, roles, win, head_q, floor_z):
+    """Calibrate tracker->joint offsets from the still pose and return joint targets."""
+    offsets = tracker_offsets(trk, roles, win, head_q, floor_z)
+    pelvis_in, ankles = apply_tracker_offsets(offsets, {k: (p, q) for k, p, q, v in trk})
+    return pelvis_in, ankles, offsets
 
 
 def apply_correction(ep: Episode, cfg_all: dict, profile: str | None = None,

@@ -52,11 +52,16 @@ class IgrisModel:
     feet="urdf"        foot boxes replaced by the URDF ones (sole 9 mm higher than the MJCF's)
                        and ankle-roll mesh colliders disabled, as in Isaac and the sim2sim runner
     limits="intersect" joint ranges = MJCF range intersected with the Isaac URDF limits
+    model              an already compiled model that contains the robot plus other bodies (e.g. a
+                       simulation scene, see igris_sim.scene). The robot must come first in the
+                       body tree, so its free joint and joints are the first nq / nv entries;
+                       joint_names, default_qpos and forward() then refer to the robot part only.
     """
 
-    def __init__(self, mjcf: str | Path = DEFAULT_MJCF, feet: str = "urdf", limits: str = "intersect"):
+    def __init__(self, mjcf: str | Path = DEFAULT_MJCF, feet: str = "urdf", limits: str = "intersect",
+                 model: mujoco.MjModel | None = None):
         self.path = Path(mjcf)
-        self.model = mujoco.MjModel.from_xml_path(str(self.path))
+        self.model = model if model is not None else mujoco.MjModel.from_xml_path(str(self.path))
         self.data = mujoco.MjData(self.model)
         m = self.model
         from ..isaaclab_ext import constants as IC  # pure python, no Isaac import
@@ -73,10 +78,14 @@ class IgrisModel:
                     m.geom_contype[g] = 0
                     m.geom_conaffinity[g] = 0
         self.urdf_limits = urdf_joint_limits(IC.IGRIS_C_URDF_PATH) if limits == "intersect" else {}
+        root = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, "base_link")
+        robot_bodies = {b for b in range(m.nbody) if b == root or self._descends(b, root)}
         self.joint_names = [mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_JOINT, j) for j in range(m.njnt)
-                            if m.jnt_type[j] != mujoco.mjtJoint.mjJNT_FREE]
+                            if m.jnt_type[j] != mujoco.mjtJoint.mjJNT_FREE and m.jnt_bodyid[j] in robot_bodies]
         self.body_names = [mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, b) for b in range(m.nbody)]
-        self.nq, self.nv, self.ndof = m.nq, m.nv, len(self.joint_names)
+        # robot part only (== m.nq / m.nv for the robot MJCF alone)
+        self.ndof = len(self.joint_names)
+        self.nq, self.nv = 7 + self.ndof, 6 + self.ndof
         for n, (lo, hi) in self.urdf_limits.items():
             j = self.jid(n)
             if j >= 0:
@@ -89,6 +98,13 @@ class IgrisModel:
         d = self.forward(self.make_qpos(np.array([0, 0, 1.0]), np.array([1.0, 0, 0, 0]), np.zeros(self.ndof)))
         self.ankle_flat_height = float(np.mean([d.xpos[self.bid(f"Link_Ankle_Roll_{s}")][2] for s in ("Left", "Right")])
                                        - self.sole_min_z(d).min())
+
+    def _descends(self, body, ancestor):
+        while body > 0:
+            body = int(self.model.body_parentid[body])
+            if body == ancestor:
+                return True
+        return False
 
     # -- ids -------------------------------------------------------------------------
     def jid(self, name):
@@ -108,7 +124,7 @@ class IgrisModel:
         return np.concatenate([root_pos, root_quat, dof])
 
     def forward(self, qpos):
-        self.data.qpos[:] = qpos
+        self.data.qpos[:len(qpos)] = qpos  # robot part; other bodies of a scene model keep qpos0
         mujoco.mj_kinematics(self.model, self.data)
         return self.data
 
