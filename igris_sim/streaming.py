@@ -178,6 +178,9 @@ class StreamingCorrector:
         except ValueError as e:  # e.g. body profile without body data
             raise CalibrationError(str(e)) from e
         cal = res["calibration"]
+        if cal["profile"] != self.profile:  # correct_episode fell back to a sensor-only profile
+            raise CalibrationError(f"profile {self.profile!r} needs body tracking during calibration, but the "
+                                   f"window has almost none (Full body mode, trackers calibrated and worn?)")
         a, b = cal["still_window"]
         # headset + controllers (3-point / sparse) or body tracking (body profiles) must be tracked
         tracked = float(np.mean(res["arrays"]["proc/valid"][a:b])) if b > a else 0.0
@@ -406,7 +409,7 @@ class StreamingRetargeter:
         self.cfg = cfg
         self.fps = float(fps)
         pp = cfg.get("postprocess", {})
-        self.margin = float(pp.get("joint_margin", 0.0))
+        self.q_lo, self.q_hi = self.rt.reference_range()  # same range as the offline output (Isaac soft limits)
         self.flat_feet = bool(pp.get("flat_feet_in_contact", True))
         self.ground = pp.get("ground", "contact")
         ratio = pp.get("max_speed_ratio")
@@ -467,8 +470,7 @@ class StreamingRetargeter:
         return q
 
     def _post(self, q, contact):
-        rng = self.robot.jnt_range
-        q[7:] = np.clip(q[7:], rng[:, 0] + self.margin, rng[:, 1] - self.margin)
+        q[7:] = np.clip(q[7:], self.q_lo, self.q_hi)
         if self.vmax is not None and self.prev is not None:
             q[7:] = self.prev[7:] + np.clip(q[7:] - self.prev[7:], -self.vmax, self.vmax)
         if self.ground != "none":

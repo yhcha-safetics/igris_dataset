@@ -50,12 +50,12 @@ class ProbeReport:
 
 
 def _adb_props() -> dict:
-    adb = shutil.which("adb")
+    adb = find_adb()
     if adb is None:
         return {}
     out = {}
     for key, prop in (("model", "ro.product.model"), ("os", "ro.build.display.id"),
-                      ("brand", "ro.product.brand")):
+                      ("brand", "ro.product.brand"), ("android_sdk", "ro.build.version.sdk")):
         try:
             r = subprocess.run([adb, "shell", "getprop", prop], capture_output=True, text=True, timeout=5)
             if r.returncode == 0 and r.stdout.strip():
@@ -65,6 +65,37 @@ def _adb_props() -> dict:
     return out
 
 
+def find_adb() -> str | None:
+    """adb on PATH, else the platform-tools folder this project's README points to."""
+    from pathlib import Path
+
+    adb = shutil.which("adb")
+    if adb is None:
+        cand = Path.home() / "Downloads" / "platform-tools-latest-windows" / "platform-tools" / "adb.exe"
+        adb = str(cand) if cand.is_file() else None
+    return adb
+
+
+def usb_tunnel(port: int = 63901) -> bool:
+    """`adb reverse`: the headset's 127.0.0.1:<port> reaches the PC service over USB.
+
+    Enter 127.0.0.1 as the PC IP in the headset app; no Wi-Fi, firewall rule or headset sleep
+    issues, lower latency. Needs USB debugging allowed on the headset.
+    """
+    adb = find_adb()
+    if adb is None:
+        return False
+    try:
+        # re-registering an existing reverse can drop the app's open connection: only add it when missing
+        cur = subprocess.run([adb, "reverse", "--list"], capture_output=True, text=True, timeout=10)
+        if cur.returncode == 0 and f"tcp:{port} tcp:{port}" in cur.stdout:
+            return True
+        r = subprocess.run([adb, "reverse", f"tcp:{port}", f"tcp:{port}"], capture_output=True, text=True, timeout=10)
+    except (subprocess.SubprocessError, OSError):
+        return False
+    return r.returncode == 0
+
+
 def probe(duration: float = 3.0, source=None, declared_body_trackers: int | None = None,
           tracker_hw: str = "unknown") -> ProbeReport:
     """Sample the live stream for `duration` seconds and summarise it."""
@@ -72,8 +103,10 @@ def probe(duration: float = 3.0, source=None, declared_body_trackers: int | None
 
     rep = ProbeReport(declared_body_trackers=declared_body_trackers, tracker_hw=tracker_hw)
     props = _adb_props()
-    rep.headset_model = props.get("model", "unknown (adb not available)" if not shutil.which("adb") else "unknown")
-    rep.headset_os = props.get("os", "unknown")
+    rep.headset_model = props.get("model", "unknown (adb not available)" if not find_adb() else "unknown")
+    if rep.headset_model == "A9210":
+        rep.headset_model = "A9210 (PICO 4 Ultra Enterprise)"
+    rep.headset_os = props.get("os", "unknown") + (f" / API {props['android_sdk']}" if "android_sdk" in props else "")
 
     own = source is None
     src = source or XRTSource(with_hands=False).open()
@@ -95,8 +128,9 @@ def probe(duration: float = 3.0, source=None, declared_body_trackers: int | None
 
     if len(frames) < 2:
         rep.notes.append("No packets received. Check in order: PC service running, firewall inbound rule "
-                         "(TCP 63901), PC IP entered on the headset and app Status WORKING (service log: "
-                         "'new tcp connect device'), 'Send' on, Motion Trackers calibrated if in Full body mode.")
+                         "(TCP 63901), PC IP entered on the headset (127.0.0.1 with --usb) and app Status WORKING "
+                         "(service log: 'new tcp connect device'), 'Send' on, Motion Trackers calibrated if in Full "
+                         "body mode, headset worn (PICO pauses the app when it is taken off).")
         rep.profile = "none"
         return rep
     rep.connected = True

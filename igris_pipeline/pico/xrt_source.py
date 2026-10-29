@@ -2,9 +2,10 @@
 
 Requirements (see README "1-1. PICO 4 / 4 Ultra 연결"):
   * PC: XRoboToolkit-PC-Service running (RoboticsServiceProcess.exe, Windows build)
-  * Headset: XRoboToolkit Unity client APK (use the *-SDK29.apk build on PICO 4),
-    PC IP entered, Motion Tracker set to "Full body" for body tracking, "Send" toggled on,
-    "Switch w/ A Button" off (the recorder uses A to start / stop episodes)
+  * Headset: XRoboToolkit Unity client APK (the *-SDK29.apk build: minSdk 29, runs on PICO 4 and on
+    PICO 4 Ultra / Android 14), PC IP entered (127.0.0.1 over USB with --usb, see device_probe.usb_tunnel),
+    Tracking Head + Controller checked, Motion Tracker set to "Full body" for body tracking, "Send"
+    toggled on, "Switch w/ A Button" off (the recorder uses A to start / stop episodes)
   * Python: ``pip install xrobotoolkit-sdk`` (>=3.10)
 
 Known quirks of the SDK that this module works around:
@@ -177,7 +178,9 @@ class FrameBuffer:
         for i, f in enumerate(F):
             if f.trackers is None:
                 continue
-            for k, s in enumerate(f.tracker_serials):
+            # serials and poses are separate SDK calls: a tracker joining/leaving in between can
+            # make the lists differ in length for one packet
+            for k, s in enumerate(f.tracker_serials[:len(f.trackers)]):
                 if s in serials[:MAX_TRACKERS]:
                     trk[i, serials.index(s)] = f.trackers[k]
         p, q, v = pose7_to_pipe(trk)

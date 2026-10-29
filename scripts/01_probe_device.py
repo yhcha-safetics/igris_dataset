@@ -15,9 +15,14 @@ ap.add_argument("--body-trackers", type=int, default=None, help="trackers worn i
 ap.add_argument("--tracker-hw", default="unknown", help="tracker generation, stored as metadata")
 ap.add_argument("--simulate", default=None, help="profile name to simulate instead of the live stream")
 ap.add_argument("--out", default=None, help="write the report JSON here")
+ap.add_argument("--usb", action="store_true", help="adb reverse tcp:63901 (enter 127.0.0.1 as PC IP in the headset app)")
 a = ap.parse_args()
 
 src = None
+if a.usb:
+    from igris_pipeline.pico.device_probe import usb_tunnel
+
+    print("[usb] adb reverse tcp:63901:", "ok" if usb_tunnel() else "FAILED (headset connected, USB debugging allowed?)")
 if a.simulate:
     from igris_pipeline.pico.simulate import SimulatedXRTSource
 

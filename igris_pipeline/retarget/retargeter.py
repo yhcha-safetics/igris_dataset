@@ -94,6 +94,11 @@ class Retargeter:
         self.balance = bal if bal.get("enabled", False) else None
         if self.balance:
             self.com_task = mink.ComTask(cost=np.array([float(bal.get("cost", 50.0))] * 2 + [0.0]))
+        # the IK itself respects the output range (incl. Isaac soft limits): clipping only afterwards
+        # moves a contact foot off the target the IK just solved (pelvis height absorbs it instead)
+        lo, hi = self.reference_range()
+        for i, n in enumerate(self.robot.joint_names):
+            self.model.jnt_range[self.robot.jid(n)] = [lo[i], hi[i]]
         self.limits = [mink.ConfigurationLimit(self.model)]
         vmax = sc.get("velocity_limit")
         if vmax:
@@ -308,6 +313,14 @@ class Retargeter:
         res.diagnostics["scaling"] = getattr(self, "scale_info", {})
         return res
 
+    def reference_range(self) -> tuple[np.ndarray, np.ndarray]:
+        """Joint clip range of the output (postprocess.joint_margin, postprocess.isaac_soft_limits)."""
+        from ..isaaclab_ext.constants import SOFT_JOINT_POS_LIMIT_FACTOR
+
+        pp = self.cfg.get("postprocess", {})
+        soft = SOFT_JOINT_POS_LIMIT_FACTOR if pp.get("isaac_soft_limits", False) else None
+        return self.robot.reference_range(float(pp.get("joint_margin", 0.0)), soft)
+
     def postprocess(self, qpos, fps, contact):
         pp = self.cfg.get("postprocess", {})
         q = qpos.copy()
@@ -316,9 +329,8 @@ class Retargeter:
             q[:, :3] = lowpass(q[:, :3], fps, hz)
             q[:, 3:7] = lowpass_quat(q[:, 3:7], fps, hz)
             q[:, 7:] = lowpass(q[:, 7:], fps, hz)
-        margin = float(pp.get("joint_margin", 0.0))
-        rng = self.robot.jnt_range
-        q[:, 7:] = np.clip(q[:, 7:], rng[:, 0] + margin, rng[:, 1] - margin)
+        lo, hi = self.reference_range()
+        q[:, 7:] = np.clip(q[:, 7:], lo, hi)
         ratio = pp.get("max_speed_ratio")
         if ratio:  # rate-limit every joint to a fraction of its actuator speed limit
             from ..sim.mujoco_eval import load_joint_params

@@ -28,8 +28,10 @@ from isaaclab.app import AppLauncher  # noqa: E402
 
 parser = argparse.ArgumentParser(description="Train IGRIS-C motion tracking (RSL-RL PPO).")
 parser.add_argument("--task", type=str, default="Igris-C-Tracking-Flat-v0")
-parser.add_argument("--motion", type=str, default=str(PROJECT_ROOT / "data" / "sample" / "motions" / "test_sine.npz"),
-                    help="NPZ file, directory (recursive), glob, comma list or .txt list")
+DEFAULT_MOTION = str(PROJECT_ROOT / "data" / "sample" / "motions" / "test_sine.npz")
+parser.add_argument("--motion", type=str, default=None,
+                    help="NPZ file, directory (recursive), glob, comma list or .txt list "
+                         "(default: the resumed run's clips, else data/sample/motions/test_sine.npz)")
 parser.add_argument("--num_envs", type=int, default=None)
 parser.add_argument("--max_iterations", type=int, default=None)
 parser.add_argument("--seed", type=int, default=None)
@@ -40,10 +42,11 @@ parser.add_argument("--resume", type=str, default=None, help="checkpoint (.pt) t
 parser.add_argument("--save_interval", type=int, default=None)
 parser.add_argument("--logger", type=str, default=None, choices=["tensorboard", "wandb", "neptune"])
 parser.add_argument("--no_export", action="store_true", help="skip ONNX/JIT/JSON export at the end")
-parser.add_argument("--motion_z_offset", type=float, default=0.0,
-                    help="constant z shift of the reference (e.g. -0.009 for MJCF-sole clips)")
-parser.add_argument("--action_mode", type=str, default="absolute", choices=["absolute", "residual"],
-                    help="absolute: q* = q_default + s*a (default) | residual: q* = q_ref(t) + s*a")
+parser.add_argument("--motion_z_offset", type=float, default=None,
+                    help="constant z shift of the reference (e.g. -0.009 for MJCF-sole clips; default 0 / resumed run)")
+parser.add_argument("--action_mode", type=str, default=None, choices=["absolute", "residual"],
+                    help="absolute: q* = q_default + s*a (default) | residual: q* = q_ref(t) + s*a; "
+                         "with --resume the run's mode is kept unless given")
 parser.add_argument("--action_scale", type=str, default=None, choices=["beyondmimic", "gmt"],
                     help="scale preset (constants.ACTION_SCALE_PRESETS); default: beyondmimic (absolute), gmt=0.25 (residual)")
 AppLauncher.add_app_launcher_args(parser)
@@ -70,14 +73,42 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
 
+def _rel_or_abs(path: str, start: str) -> str:
+    try:
+        return os.path.relpath(path, start)
+    except ValueError:  # different drive
+        return path
+
+
+def resumed_run_settings(ckpt: str) -> dict:
+    """Policy-interface settings of the run a checkpoint belongs to (its params/ folder): resuming with
+    a different action mode / scale / reference would silently continue training a different task."""
+    params = os.path.join(os.path.dirname(os.path.abspath(ckpt)), "params")
+    out = {}
+    if os.path.isfile(os.path.join(params, "overrides.json")):
+        with open(os.path.join(params, "overrides.json"), encoding="utf-8") as f:
+            out.update(json.load(f))
+    if os.path.isfile(os.path.join(params, "motions.txt")):
+        out["motions"] = os.path.join(params, "motions.txt")
+    return out
+
+
 def main():
     env_cfg = ext.load_entry_point(args_cli.task, "env_cfg_entry_point")
     agent_cfg = ext.load_entry_point(args_cli.task, "rsl_rl_cfg_entry_point")
 
-    motion_files = resolve_motion_files(args_cli.motion)
+    prev = resumed_run_settings(args_cli.resume) if args_cli.resume else {}
+    if prev:
+        print(f"[INFO] resume: run settings {json.dumps({k: v for k, v in prev.items() if k != 'action_scale'})}")
+    action_mode = args_cli.action_mode or prev.get("action_mode", "absolute")
+    if prev.get("action_mode") and action_mode != prev["action_mode"]:
+        print(f"[WARN] resuming a {prev['action_mode']} policy with --action_mode {action_mode}")
+    action_scale = args_cli.action_scale or (prev.get("action_scale") if action_mode == prev.get("action_mode") else None)
+    motion_files = resolve_motion_files(args_cli.motion or prev.get("motions") or DEFAULT_MOTION)
     env_cfg.commands.motion.motion_file = motion_files
-    env_cfg.commands.motion.motion_z_offset = args_cli.motion_z_offset
-    configure_action(env_cfg, args_cli.action_mode, args_cli.action_scale)
+    env_cfg.commands.motion.motion_z_offset = (
+        args_cli.motion_z_offset if args_cli.motion_z_offset is not None else prev.get("motion_z_offset", 0.0))
+    configure_action(env_cfg, action_mode, action_scale)
     if args_cli.num_envs is not None:
         env_cfg.scene.num_envs = args_cli.num_envs
     if args_cli.max_iterations is not None:
@@ -113,11 +144,14 @@ def main():
 
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
-    with open(os.path.join(log_dir, "params", "motions.txt"), "w", encoding="utf-8") as f:
-        f.write("\n".join(motion_files) + "\n")
+    params_dir = os.path.join(log_dir, "params")
+    with open(os.path.join(params_dir, "motions.txt"), "w", encoding="utf-8") as f:
+        # relative to params/ (resolve_motion_files resolves list entries against the list's folder),
+        # so a run copied together with data/ to another PC still finds its clips
+        f.write("\n".join(_rel_or_abs(p, params_dir) for p in motion_files) + "\n")
     # settings play_eval.py must reproduce (read back from params/overrides.json)
-    with open(os.path.join(log_dir, "params", "overrides.json"), "w", encoding="utf-8") as f:
-        json.dump({"action_mode": args_cli.action_mode,
+    with open(os.path.join(params_dir, "overrides.json"), "w", encoding="utf-8") as f:
+        json.dump({"action_mode": action_mode,
                    "action_scale": dict(env_cfg.actions.joint_pos.scale),
                    "motion_z_offset": env_cfg.commands.motion.motion_z_offset}, f, indent=2)
 

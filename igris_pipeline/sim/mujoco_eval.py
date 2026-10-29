@@ -124,17 +124,27 @@ def kinematic_report(robot: IgrisModel, qpos: np.ndarray, fps: float, jp: JointP
     return rep
 
 
-def static_balance_report(robot: IgrisModel, qpos: np.ndarray, contact_height: float = 0.015) -> dict:
-    """CoM ground projection inside the convex hull of the sole boxes touching the floor."""
+def static_balance_report(robot: IgrisModel, qpos: np.ndarray, contact_height: float = 0.015,
+                          fps: float | None = None, max_com_speed: float = 0.15) -> dict:
+    """CoM ground projection inside the convex hull of the sole boxes touching the floor.
+
+    The criterion only holds without dynamics: during walking the CoM is legitimately outside
+    the stance foot. With `fps`, the ratio is taken over quasi-static frames (horizontal CoM
+    speed below max_com_speed); `com_in_support_ratio_all` keeps the all-frames value.
+    """
     from scipy.spatial import ConvexHull, Delaunay
 
     m = robot.model
-    inside, n_eval, airborne = 0, 0, 0
-    margins = []
-    for q in qpos:
+    T = len(qpos)
+    com_xy = np.zeros((T, 2))
+    grounded = np.zeros(T, bool)
+    inside = np.zeros(T, bool)
+    margin = np.full(T, np.nan)
+    for i, q in enumerate(qpos):
         d = robot.forward(q)
         mujoco.mj_comPos(m, d)
         com = d.subtree_com[robot.bid("base_link")][:2].copy()
+        com_xy[i] = com
         pts = []
         for g in robot.foot_geoms:
             half = m.geom_size[g]
@@ -143,22 +153,26 @@ def static_balance_report(robot: IgrisModel, qpos: np.ndarray, contact_height: f
             if w[:, 2].min() < contact_height:
                 pts.append(w[w[:, 2] < w[:, 2].min() + contact_height, :2])
         if not pts:
-            airborne += 1
             continue
         pts = np.concatenate(pts)
-        n_eval += 1
+        grounded[i] = True
         try:
             hull = ConvexHull(pts)
-            ok = Delaunay(pts[hull.vertices]).find_simplex(com) >= 0
+            inside[i] = Delaunay(pts[hull.vertices]).find_simplex(com) >= 0
             # signed distance to the hull boundary (positive inside)
             eq = hull.equations
-            margins.append(float(-np.max(eq[:, :2] @ com + eq[:, 2])))
+            margin[i] = float(-np.max(eq[:, :2] @ com + eq[:, 2]))
         except Exception:  # degenerate hull (single edge)
-            ok = False
-        inside += bool(ok)
-    return {"com_in_support_ratio": round(inside / max(n_eval, 1), 3),
-            "airborne_ratio": round(airborne / len(qpos), 3),
-            "median_support_margin_cm": round(float(np.median(margins)) * 100, 1) if margins else None}
+            pass
+    static = grounded.copy()
+    if fps and T > 2:
+        speed = np.linalg.norm(np.gradient(com_xy, 1.0 / fps, axis=0), axis=-1)
+        static &= speed < max_com_speed
+    ratio = lambda mask: round(float(inside[mask].mean()), 3) if mask.any() else 1.0  # noqa: E731
+    return {"com_in_support_ratio": ratio(static), "com_in_support_ratio_all": ratio(grounded),
+            "static_ratio": round(float(static.mean()), 3), "airborne_ratio": round(float(1 - grounded.mean()), 3),
+            "median_support_margin_cm": round(float(np.nanmedian(margin[static])) * 100, 1)
+            if np.isfinite(margin[static]).any() else None}
 
 
 def _quat_err(q_ref, q):
@@ -283,7 +297,7 @@ def evaluate_clip(qpos: np.ndarray, fps: float, robot: IgrisModel | None = None,
     jp = load_joint_params(robot)
     out = {"duration_s": round(len(qpos) / fps, 2)}
     out["kinematic"] = kinematic_report(robot, qpos, fps, jp)
-    out["static_balance"] = static_balance_report(robot, qpos)
+    out["static_balance"] = static_balance_report(robot, qpos, fps=fps)
     # pd_replay reconfigures the model it is given (servo gains, joint params) identically on every
     # call with the same gain_scale, so one harness copy serves the clip and all its segments
     harness_robot = IgrisModel(robot.path)
@@ -297,7 +311,7 @@ def evaluate_clip(qpos: np.ndarray, fps: float, robot: IgrisModel | None = None,
             if b - a < int(0.5 * fps):
                 continue
             hb = pd_replay(harness_robot, qpos[a:b], fps, jp, harness=True, gain_scale=4.0)
-            sb = static_balance_report(robot, qpos[a:b])
+            sb = static_balance_report(robot, qpos[a:b], fps=fps)
             rows.append({"name": sg.get("name", ""), "t_start": round(a / fps, 2), "t_end": round(b / fps, 2),
                          "com_in_support": sb["com_in_support_ratio"], "harness_mean_pct_mg": hb["harness_force_pct_mg"]["mean"],
                          "harness_p95_pct_mg": hb["harness_force_pct_mg"]["p95"], "mpkpe_cm": hb["mpkpe_global_cm"],
@@ -319,7 +333,7 @@ def verdict(rep: dict) -> dict:
         flags.append("floor penetration > 2 cm")
     sb = rep["static_balance"]
     if sb["com_in_support_ratio"] < 0.6:
-        flags.append("CoM outside support polygon in >40% of grounded frames")
+        flags.append("CoM outside support polygon in >40% of quasi-static grounded frames")
     h = rep["pd_replay_harness"]
     if h["harness_force_pct_mg"]["p95"] > 50:
         flags.append("needs strong external support (harness p95 > 50% mg)")

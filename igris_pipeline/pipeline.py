@@ -82,7 +82,7 @@ def stage_label(ep_path, rules=None, learned_path=None, plot=True, overwrite_rev
 
 
 # -- stage 3 ----------------------------------------------------------------------------
-def stage_retarget(ep_path, retarget_cfg=None, export_fps=50.0) -> dict:
+def stage_retarget(ep_path, retarget_cfg=None, export_fps=50.0, min_part_s=2.0) -> dict:
     from .retarget import export as X
     from .retarget.retargeter import Retargeter
 
@@ -97,15 +97,52 @@ def stage_retarget(ep_path, retarget_cfg=None, export_fps=50.0) -> dict:
     X.store_in_episode(ep, res)
     ep.save(ep_path)
     md = _motions_dir(ep_path)
+    for old in list(md.glob(f"{ep_path.stem}.*")) + list(md.glob(f"{ep_path.stem}_p[0-9]*.*")):
+        old.unlink()  # a re-run may split differently; stale parts would be picked up by folder/glob loaders
     segs = json.loads(ep.group_attrs.get("labels", {}).get("segments", "[]"))
-    meta = {"episode": str(ep_path), "profile": proc.get("profile"), "source_fps": fps,
-            "segments": segs, "retarget": res.diagnostics.get("scaling")}
-    X.to_tracking_npz(md / f"{ep_path.stem}.npz", r.robot, res.qpos, fps, export_fps, meta=meta)
-    X.to_canonical_pkl(md / f"{ep_path.stem}.pkl", r.robot, res.qpos, fps, meta=meta)
-    X.to_csv(md / f"{ep_path.stem}.csv", X.resample_qpos(res.qpos, fps, 30.0))
+    valid = ep["proc/valid"].astype(bool) if "proc/valid" in ep else np.ones(len(res.qpos), bool)
+    parts = motion_parts(valid, fps, min_part_s)
+    exported = []
+    for k, (a, b) in enumerate(parts):
+        name = ep_path.stem if len(parts) == 1 and (a, b) == (0, len(valid)) else f"{ep_path.stem}_p{k}"
+        q = res.qpos[a:b]
+        meta = {"episode": str(ep_path), "profile": proc.get("profile"), "source_fps": fps,
+                "source_frames": [int(a), int(b)], "retarget": res.diagnostics.get("scaling")}
+        # segment indices at the source fps, re-based to the part (load_segments rescales via source_fps)
+        X.to_tracking_npz(md / f"{name}.npz", r.robot, q, fps, export_fps,
+                          meta={**meta, "segments": _segments_in(segs, a, b, fps)})
+        X.to_canonical_pkl(md / f"{name}.pkl", r.robot, q, fps, meta={**meta, "segments": _segments_in(segs, a, b, fps)})
+        X.to_csv(md / f"{name}.csv", X.resample_qpos(q, fps, 30.0))
+        exported.append({"name": name, "t_start": round(a / fps, 2), "t_end": round(b / fps, 2)})
+    res.diagnostics["motion_parts"] = exported
+    res.diagnostics["invalid_s"] = round(float((~valid).sum() / fps), 2)
     (_reports_dir(ep_path) / f"{ep_path.stem}_retarget.json").write_text(
         json.dumps(res.diagnostics, ensure_ascii=False, indent=1), encoding="utf-8")
     return res.diagnostics
+
+
+def motion_parts(valid: np.ndarray, fps: float, min_part_s: float = 2.0) -> list[tuple[int, int]]:
+    """Frame ranges of the motion that are backed by tracking data.
+
+    Correction bridges gaps up to max_gap_s; longer dropouts stay invalid there and are only
+    interpolated, so they are cut out of the exported clips instead of becoming training data.
+    """
+    v = np.concatenate([[False], np.asarray(valid, bool), [False]])
+    edges = np.flatnonzero(np.diff(v.astype(np.int8)))
+    runs = list(zip(edges[0::2], edges[1::2]))
+    return [(int(a), int(b)) for a, b in runs if b - a >= max(2, int(min_part_s * fps))]
+
+
+def _segments_in(segs: list[dict], a: int, b: int, fps: float) -> list[dict]:
+    """Label segments clipped to source frames [a, b) and re-based to a. Indices stay at the source
+    fps (meta.source_fps), which is how isaaclab_ext.motion.load_segments reads them."""
+    out = []
+    for s in segs:
+        s0, s1 = max(int(s["start"]), a), min(int(s["end"]), b)
+        if s1 > s0:
+            out.append(dict(s, start=s0 - a, end=s1 - a, t_start=round((s0 - a) / fps, 3),
+                            t_end=round((s1 - a) / fps, 3)))
+    return out
 
 
 # -- stage 4 (MuJoCo feasibility) --------------------------------------------------------
@@ -118,6 +155,9 @@ def stage_eval_mujoco(ep_path, per_segment=True, harness_free=False) -> dict:
     fps = float(ep.group_attrs["retarget/igris_c"]["fps"])
     segs = json.loads(ep.group_attrs.get("labels", {}).get("segments", "[]")) if per_segment else None
     rep = evaluate_clip(q, fps, harness_free=harness_free, segments=segs)
+    if "proc/valid" in ep and not ep["proc/valid"].all():
+        invalid_s = float((~ep["proc/valid"].astype(bool)).sum() / fps)
+        rep["verdict"]["flags"].append(f"tracking dropouts: {invalid_s:.1f} s interpolated (cut from motions/)")
     (_reports_dir(ep_path) / f"{ep_path.stem}_mujoco.json").write_text(
         json.dumps(rep, ensure_ascii=False, indent=1), encoding="utf-8")
     return rep
@@ -144,7 +184,9 @@ def run_session(session_dir, stages=("correct", "label", "retarget", "eval"), pr
             d = stage_retarget(p)
             row["segment_dir_err_deg_mean"] = round(float(np.mean(list(d["segment_dir_err_deg"].values()))), 2)
             row["foot_skate_mps"] = d.get("foot_skate_mps_in_contact")
-            log(f"   retargeted ({d['solve_time_s']} s)")
+            row["invalid_s"] = d["invalid_s"]
+            row["motion_parts"] = [m["name"] for m in d["motion_parts"]]
+            log(f"   retargeted ({d['solve_time_s']} s), exported {row['motion_parts']}")
         if "eval" in stages:
             r = stage_eval_mujoco(p)
             row["com_in_support"] = r["static_balance"]["com_in_support_ratio"]

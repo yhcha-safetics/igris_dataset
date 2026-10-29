@@ -64,7 +64,7 @@ from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper  # noqa: E402
 import igris_pipeline.isaaclab_ext as ext  # noqa: E402
 from igris_pipeline.isaaclab_ext.export import export_policy, get_policy_and_normalizer  # noqa: E402
 from igris_pipeline.isaaclab_ext.metrics import EpisodeAccumulator, step_metrics, write_json  # noqa: E402
-from igris_pipeline.isaaclab_ext.motion import load_segments, resolve_motion_files  # noqa: E402
+from igris_pipeline.isaaclab_ext.motion import load_segments, project_relative, resolve_motion_files  # noqa: E402
 from igris_pipeline.isaaclab_ext.tracking_env_cfg import configure_action  # noqa: E402
 
 
@@ -182,10 +182,12 @@ def dump_first_obs(env, policy, path: str, steps: int):
 def main():
     ckpt = resolve_checkpoint()
     run_dir = os.path.dirname(ckpt)
+    train_list = os.path.join(run_dir, "params", "motions.txt")
+    training_files = resolve_motion_files(train_list) if os.path.isfile(train_list) else None
     if args_cli.motion:
         motion_files = resolve_motion_files(args_cli.motion)
-    elif os.path.isfile(os.path.join(run_dir, "params", "motions.txt")):
-        motion_files = resolve_motion_files(os.path.join(run_dir, "params", "motions.txt"))
+    elif training_files:
+        motion_files = training_files
     else:
         motion_files = resolve_motion_files(str(PROJECT_ROOT / "data" / "sample" / "motions" / "test_sine.npz"))
 
@@ -216,8 +218,10 @@ def main():
     export_paths = None
     if not args_cli.no_export:
         policy_nn, normalizer = get_policy_and_normalizer(runner)
+        # policy.json keeps the run's training clips even when evaluating other clips (--motion)
+        extra = {"training_motion_files": project_relative(training_files)} if training_files else None
         export_paths = export_policy(policy_nn, normalizer, uenv, os.path.join(run_dir, "exported"),
-                                     task_id=args_cli.task.replace("-Play", ""), checkpoint=ckpt)
+                                     task_id=args_cli.task.replace("-Play", ""), checkpoint=ckpt, extra=extra)
         print(f"[INFO] exported: {export_paths}")
 
     # NOTE: everything that steps the env runs under inference_mode (buffers created inside it cannot be

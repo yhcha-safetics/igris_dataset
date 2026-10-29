@@ -41,15 +41,17 @@ if a.train:
     Path(a.train).parent.mkdir(parents=True, exist_ok=True)
     review.train_learned(eps, syn, a.train)
     print("saved", a.train)
-elif a.import_review:
+elif a.import_review or a.export_review:
+    if len(paths) != 1:
+        raise SystemExit(f"--import-review / --export-review take exactly one episode .h5 (got {len(paths)})")
     ep = Episode.load(paths[0])
-    review.import_review_csv(ep, a.import_review, rules)
-    ep.save(paths[0])
-    print("applied", a.import_review, "->", paths[0], "(marked reviewed)")
-elif a.export_review:
-    ep = Episode.load(paths[0])
-    review.export_review_csv(ep, a.export_review)
-    print("wrote", a.export_review)
+    if a.import_review:
+        review.import_review_csv(ep, a.import_review, rules)
+        ep.save(paths[0])
+        print("applied", a.import_review, "->", paths[0], "(marked reviewed, segments rebuilt)")
+    else:
+        review.export_review_csv(ep, a.export_review)
+        print("wrote", a.export_review)
 else:
     for p in paths:
         segs = stage_label(p, rules, a.learned, overwrite_reviewed=a.overwrite_reviewed)
