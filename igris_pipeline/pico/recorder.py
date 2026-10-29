@@ -31,6 +31,68 @@ def buffer_to_episode(buf: FrameBuffer, meta: dict) -> Episode:
     return ep
 
 
+def next_episode_index(out_dir: Path) -> int:
+    """One past the highest existing ep_NNNN.h5 (counting files would overwrite after a deleted take)."""
+    idx = [int(p.stem[3:]) for p in Path(out_dir).glob("ep_*.h5") if p.stem[3:].isdigit()]
+    return max(idx) + 1 if idx else 0
+
+
+class RecordingSession:
+    """Episode recording fed one XRFrame at a time (used by record() and the live viewer).
+
+    With use_buttons the A button toggles recording and B drops a marker; otherwise every
+    frame is recorded until close().
+    """
+
+    def __init__(self, out_dir: str | Path, meta: dict, use_buttons: bool = True, autostart: bool = False,
+                 with_hands: bool = False, on_status=print):
+        self.out_dir = Path(out_dir)
+        self.meta = meta
+        self.use_buttons = use_buttons
+        self.with_hands = with_hands
+        self.on_status = on_status
+        self.saved: list[Path] = []
+        self.buf = FrameBuffer(with_hands=with_hands)
+        self.recording = autostart or not use_buttons
+        self._prev = {"A": False, "B": False}
+        self._ep_idx = next_episode_index(self.out_dir)
+        if self.recording:
+            on_status("[rec] recording ...")
+
+    def _flush(self):
+        if len(self.buf) > 10:
+            ep = buffer_to_episode(self.buf, self.meta)
+            path = self.out_dir / f"ep_{self._ep_idx:04d}.h5"
+            ep.save(path)
+            self.saved.append(path)
+            self.on_status(f"[rec] saved {path} ({len(self.buf)} frames, {ep.fps:.1f} Hz)")
+            self._ep_idx += 1
+        self.buf = FrameBuffer(with_hands=self.with_hands)
+
+    def feed(self, fr) -> None:
+        if self.use_buttons:
+            a, b = bool(fr.buttons.get("A")), bool(fr.buttons.get("B"))
+            if a and not self._prev["A"]:
+                if self.recording:
+                    self.recording = False
+                    self._flush()
+                    self.on_status("[rec] stopped")
+                else:
+                    self.recording = True
+                    self.on_status("[rec] recording ...")
+            if b and not self._prev["B"] and self.recording and len(self.buf):
+                self.buf.events.append(((fr.t_ns - self.buf.frames[0].t_ns) * 1e-9, "marker"))
+            self._prev = {"A": a, "B": b}
+        if self.recording:
+            self.buf.append(fr)
+
+    def close(self) -> list[Path]:
+        if self.recording or len(self.buf):
+            self._flush()
+        self.recording = False
+        return self.saved
+
+
 def record(source, out_dir: str | Path, meta: dict, max_seconds: float | None = None,
            use_buttons: bool = True, autostart: bool = False, with_hands: bool = False,
            on_status=print) -> list[Path]:
@@ -39,27 +101,8 @@ def record(source, out_dir: str | Path, meta: dict, max_seconds: float | None = 
     With use_buttons the A button toggles recording; otherwise recording runs from
     the start until max_seconds / Ctrl+C / end of a simulated stream.
     """
-    out_dir = Path(out_dir)
-    saved: list[Path] = []
-    buf = FrameBuffer(with_hands=with_hands)
-    recording = autostart or not use_buttons
-    prev = {"A": False, "B": False}
+    rec = RecordingSession(out_dir, meta, use_buttons, autostart, with_hands, on_status)
     t_start = time.time()
-    ep_idx = len(list(out_dir.glob("*.h5"))) if out_dir.exists() else 0
-
-    def flush():
-        nonlocal buf, ep_idx
-        if len(buf) > 10:
-            ep = buffer_to_episode(buf, meta)
-            path = out_dir / f"ep_{ep_idx:04d}.h5"
-            ep.save(path)
-            saved.append(path)
-            on_status(f"[rec] saved {path} ({len(buf)} frames, {ep.fps:.1f} Hz)")
-            ep_idx += 1
-        buf = FrameBuffer(with_hands=with_hands)
-
-    if recording:
-        on_status("[rec] recording ...")
     try:
         while True:
             if max_seconds is not None and time.time() - t_start > max_seconds:
@@ -71,26 +114,10 @@ def record(source, out_dir: str | Path, meta: dict, max_seconds: float | None = 
             if fr is None:
                 time.sleep(0.001)
                 continue
-            if use_buttons:
-                a, b = bool(fr.buttons.get("A")), bool(fr.buttons.get("B"))
-                if a and not prev["A"]:
-                    if recording:
-                        recording = False
-                        flush()
-                        on_status("[rec] stopped")
-                    else:
-                        recording = True
-                        on_status("[rec] recording ...")
-                if b and not prev["B"] and recording and len(buf):
-                    buf.events.append(((fr.t_ns - buf.frames[0].t_ns) * 1e-9, "marker"))
-                prev = {"A": a, "B": b}
-            if recording:
-                buf.append(fr)
+            rec.feed(fr)
     except KeyboardInterrupt:
         on_status("[rec] interrupted")
-    if recording or len(buf):
-        flush()
-    return saved
+    return rec.close()
 
 
 def describe_episode(path) -> str:

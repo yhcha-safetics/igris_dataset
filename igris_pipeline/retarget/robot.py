@@ -90,6 +90,23 @@ class IgrisModel:
         self.ankle_flat_height = float(np.mean([d.xpos[self.bid(f"Link_Ankle_Roll_{s}")][2] for s in ("Left", "Right")])
                                        - self.sole_min_z(d).min())
 
+    def reference_range(self, margin: float = 0.0, soft_factor: float | None = None) -> tuple[np.ndarray, np.ndarray]:
+        """Joint range (lower, upper) in joint_names order that exported references are clipped to.
+
+        Hard range (MJCF ∩ URDF) shrunk by `margin`, and with `soft_factor` additionally Isaac's soft
+        limits (mid +- 0.5 * URDF range * factor) for the joints Isaac simulates: a reference outside
+        them is penalised every step and clipped at reset, so the policy could never match it.
+        """
+        lo = self.jnt_range[:, 0] + margin
+        hi = self.jnt_range[:, 1] - margin
+        if soft_factor:
+            for i, n in enumerate(self.joint_names):
+                if n in self.urdf_limits:
+                    ul, uh = self.urdf_limits[n]
+                    mid, half = 0.5 * (ul + uh), 0.5 * (uh - ul) * float(soft_factor)
+                    lo[i], hi[i] = max(lo[i], mid - half), min(hi[i], mid + half)
+        return lo, hi
+
     # -- ids -------------------------------------------------------------------------
     def jid(self, name):
         return mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, name)

@@ -112,6 +112,9 @@ DEFAULT_JOINT_POS = {
 """Default standing pose (all other joints 0). Same as robros.py IGRIS_C_LOCOMOTION_CFG.init_state."""
 
 DEFAULT_ROOT_HEIGHT = 0.98  # robros.py init_state.pos z (overwritten by the motion at reset anyway)
+# Isaac soft joint limits = mid +- 0.5 * range * factor (URDF ranges); the joint-limit penalty and the
+# reset clip use them, so the retargeter clips the reference to the same range (retarget/robot.py)
+SOFT_JOINT_POS_LIMIT_FACTOR = 0.9
 
 # --------------------------------------------------------------------------------------
 # Actuators -- copied verbatim from

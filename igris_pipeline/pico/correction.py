@@ -26,14 +26,17 @@ from scipy.ndimage import binary_closing, binary_opening, median_filter
 
 from ..episode import Episode
 from ..skeleton import J, JOINT_GROUP, NUM_JOINTS, PARENTS, BONES, PICO_JOINTS, default_bone_length_array
-from ..utils.geometry import (fill_invalid, frame_from_two_vectors, lowpass, lowpass_quat, resample_series,
-                              swing_quat, two_bone_ik, unit)
+from ..utils.geometry import (frame_from_two_vectors, lowpass, lowpass_quat, resample_series, swing_quat,
+                              two_bone_ik, unit)
 from ..utils.rotations import (quat_apply, quat_angle_between, quat_conj, quat_continuity, quat_mul,
                                quat_normalize, yaw_of, yaw_quat)
 from .synthetic import REST_OFFSETS
 
 UP = np.array([0.0, 0.0, 1.0])
 ANKLE_HEIGHT = 0.08
+MIN_BODY_VALID = 0.2       # below this fraction of valid body frames a body profile falls back to the sensors
+MAX_ANCHOR_DEV = 0.15      # m; controller-derived wrist this far from the solver wrist is not trusted
+MAX_REST_DEV_DEG = 15.0    # README: PICO joint frames should be within ~15 deg of identity at the T-pose
 REST_DIR = unit(REST_OFFSETS + 1e-12)  # T-pose bone direction of each joint relative to its parent
 LIMBS = {  # name: (root, mid, end, pole hint in body frame)
     "left_arm": ("left_shoulder", "left_elbow", "left_wrist", np.array([-0.3, 0.3, -1.0])),
@@ -83,8 +86,12 @@ def _mean_quat(q):
     return m if m[0] >= 0 else -m
 
 
-def _still_window(pos_list, fps, window_s, search_s):
-    """Index slice of the stillest window in the first search_s seconds."""
+def _still_window(pos_list, fps, window_s, search_s, valid=None):
+    """Index slice of the stillest window in the first search_s seconds.
+
+    Frames outside `valid` (bridged dropouts) move at a constant interpolated speed or not at
+    all, so they are excluded instead of being allowed to win as the "stillest" window.
+    """
     n = max(2, int(window_s * fps))
     T = pos_list[0].shape[0]
     m = min(T, int(search_s * fps))
@@ -93,6 +100,10 @@ def _still_window(pos_list, fps, window_s, search_s):
         v = np.linalg.norm(np.gradient(p, 1.0 / fps, axis=0), axis=-1)
         speed += v.reshape(T, -1).mean(axis=1)
     speed /= len(pos_list)
+    if valid is not None and valid.any():
+        speed = np.where(valid, speed, 1e3)
+        if not valid[:m].any():  # nothing valid early on: search the whole take
+            m = T
     if m <= n:
         return slice(0, min(T, n)), float(speed[:n].max())
     c = np.convolve(speed[:m], np.ones(n) / n, mode="valid")
@@ -107,6 +118,11 @@ def _heading_from_body(pos):
     lat[..., 2] = 0
     fwd = np.cross(unit(lat), UP)
     return np.arctan2(fwd[..., 1], fwd[..., 0])
+
+
+def _circular_median(angles):
+    """Median heading that does not break at +-pi (a scalar median of angles does)."""
+    return float(np.arctan2(np.median(np.sin(angles)), np.median(np.cos(angles))))
 
 
 def _rot_z(yaw):
@@ -341,12 +357,24 @@ def _rest_vec(L, a, b):
 def correct_episode(ep: Episode, cfg_all: dict, profile: str | None = None,
                     subject_height: float | None = None) -> dict:
     profile = profile or ep.attrs.get("tracker_profile") or "body_2trk"
+    report: dict = {"profile": profile, "steps": []}
+    if profile.startswith("body"):
+        # body tracking can be lost after the probe (trackers asleep, mode switched): fall back to
+        # the sensor-only solver instead of calibrating on an empty body stream
+        bvalid = ep["raw/body/valid"] if "raw/body/valid" in ep else np.zeros(ep.num_frames, bool)
+        if bvalid.mean() < MIN_BODY_VALID:
+            has_trk = "raw/tracker/valid" in ep and ep["raw/tracker/valid"].any()
+            fallback = "sparse_trackers" if has_trk else "hmd_3pt"
+            report["steps"].append({"warning": f"profile {profile}: only {bvalid.mean():.0%} of frames have body "
+                                               f"data; using {fallback} instead"})
+            profile = fallback
+            report["profile"] = profile
     cfg = profile_config(cfg_all, profile)
     fps = float(cfg["fps"])
     max_gap = float(cfg["max_gap_s"])
     subject_height = subject_height or ep.attrs.get("subject_height")
     subject_height = float(subject_height) if subject_height else None
-    report: dict = {"profile": profile, "steps": []}
+    observed_axes = list(cfg.get("observed_axes", ["loco", "lower", "upper"]))
 
     t = ep["raw/t"]
     tn = np.arange(0.0, t[-1] - t[0] + 1e-9, 1.0 / fps) + t[0]
@@ -377,8 +405,9 @@ def correct_episode(ep: Episode, cfg_all: dict, profile: str | None = None,
         report["steps"].append({"outliers": {"joint_frames": int(outl.sum()),
                                              "per_joint": {PICO_JOINTS[j]: int(outl[:, j].sum())
                                                            for j in range(NUM_JOINTS) if outl[:, j].any()}}})
-        bp = fill_invalid(bp, bv)
-        bq = fill_invalid(bq, bv, is_quat=True)
+        # Long gaps keep the interpolation from resample_series (continuous, held only before
+        # the first / after the last sample) and stay invalid; holding the nearest sample
+        # instead froze each half of the gap and jumped in the middle.
         valid = bv
         gapf = bg
     else:
@@ -389,22 +418,29 @@ def correct_episode(ep: Episode, cfg_all: dict, profile: str | None = None,
     # 3) calibration ------------------------------------------------------------------
     calib: dict = {"profile": profile}
     if is_body:
-        win, still_speed = _still_window([bp], fps, cfg["calibration"]["window_s"], cfg["calibration"]["search_s"])
+        win, still_speed = _still_window([bp], fps, cfg["calibration"]["window_s"], cfg["calibration"]["search_s"],
+                                         valid=valid)
         ank_z = np.minimum(bp[valid, J["left_ankle"], 2], bp[valid, J["right_ankle"], 2])
         floor = float(np.percentile(ank_z, 5) - ANKLE_HEIGHT)
         lengths = np.median(np.linalg.norm(
             bp[valid][:, [c for _, c in BONES]] - bp[valid][:, [p for p, _ in BONES]], axis=-1), axis=0)
-        yaw0 = float(np.median(_heading_from_body(bp[win])))
+        yaw0 = _circular_median(_heading_from_body(bp[win]))
         stature = float(np.median(bp[win, J["head"], 2]) - floor + 0.12)
         # joint-frame sanity: at a T-pose PICO joints should be ~heading-aligned
         rest_dev = quat_angle_between(bq[win].mean(0), np.broadcast_to(yaw_quat(yaw0), (NUM_JOINTS, 4)))
         calib["rest_orientation_deviation_deg"] = {PICO_JOINTS[j]: round(float(np.degrees(rest_dev[j])), 1)
                                                    for j in range(NUM_JOINTS)}
+        dev_med = float(np.degrees(np.median(rest_dev)))
+        if dev_med > MAX_REST_DEV_DEG:
+            report["steps"].append({"warning": f"median joint-frame deviation at the calibration pose is "
+                                               f"{dev_med:.1f} deg (> {MAX_REST_DEV_DEG:.0f}): no T-pose at the start, "
+                                               f"or the PICO joint frame convention differs (frames.py)"})
     else:
         h = subject_height or 1.70
         lengths = default_bone_length_array() * (h / 1.70)
         sources = [hmd_p, ctrl["left"][0], ctrl["right"][0]]
-        win, still_speed = _still_window(sources, fps, cfg["calibration"]["window_s"], cfg["calibration"]["search_s"])
+        win, still_speed = _still_window(sources, fps, cfg["calibration"]["window_s"], cfg["calibration"]["search_s"],
+                                         valid=valid)
         hmd_z0 = float(np.median(hmd_p[win, 2]))
         floor = hmd_z0 - (h - 0.11)  # eyes are ~11 cm below the top of the head
         f = quat_apply(hmd_q[win], np.array([1.0, 0, 0]))
@@ -440,6 +476,7 @@ def correct_episode(ep: Episode, cfg_all: dict, profile: str | None = None,
 
     # trackers (object mode)
     trk = None
+    sensor_valid: dict = {}  # "pelvis" / "ankles" -> (T,) validity of the tracker anchoring them
     if "raw/tracker/pos" in ep and ep["raw/tracker/valid"].any():
         K = ep["raw/tracker/pos"].shape[1]
         trk = []
@@ -449,7 +486,7 @@ def correct_episode(ep: Episode, cfg_all: dict, profile: str | None = None,
                 continue
             p, v, _ = resample_series(t, ep["raw/tracker/pos"][:, k], v_raw, tn, max_gap)
             q, _, _ = resample_series(t, ep["raw/tracker/quat"][:, k], v_raw, tn, max_gap, is_quat=True)
-            trk.append((k, align_p(fill_invalid(p, v)), align_q(fill_invalid(q, v, True)), v))
+            trk.append((k, align_p(p), align_q(q), v))
 
     if is_body:
         bp = align_p(bp)
@@ -460,17 +497,16 @@ def correct_episode(ep: Episode, cfg_all: dict, profile: str | None = None,
         wrist_q = {}
         for s in ("left", "right"):
             p, q, v, _ = ctrl[s]
-            p, q = fill_invalid(p, v), fill_invalid(q, v, True)
             o_p, o_q = offs[f"ctrl_{s}"]
             wrist_q[s] = quat_mul(q, np.broadcast_to(quat_conj(o_q), q.shape))
             wrist[s] = p - quat_apply(wrist_q[s], o_p)
-        head_q = fill_invalid(hmd_q, hmd_v, True)
-        head_p = fill_invalid(hmd_p, hmd_v) - quat_apply(head_q, offs["hmd_to_head"])
+        head_q = hmd_q
+        head_p = hmd_p - quat_apply(head_q, offs["hmd_to_head"])
         pelvis_in, ankles_in, roles = None, None, {}
         if trk:
             roles = _assign_tracker_roles(trk, win, ep, cfg)
             calib["tracker_roles"] = {str(k): r for k, r in roles.items()}
-            pelvis_in, ankles_in = _tracker_targets(trk, roles, win, head_q, floor_z)
+            pelvis_in, ankles_in, sensor_valid = _tracker_targets(trk, roles, win, head_q, floor_z)
         solver = SparseBodySolver(lengths)
         bp, bq = solver.solve(fps, head_p, head_q, wrist, wrist_q, floor_z, pelvis=pelvis_in, ankles=ankles_in)
         report["steps"].append({"sparse_solver": {"trackers": len(trk or []), "roles": calib.get("tracker_roles")}})
@@ -503,18 +539,28 @@ def correct_episode(ep: Episode, cfg_all: dict, profile: str | None = None,
                 if ok.sum() < fps:  # need ~1 s of overlap to calibrate the grip offset
                     continue
                 wj = J[f"{s_}_wrist"]
-                local = quat_apply(quat_conj(bq[ok, wj]), p[ok] - bp[ok, wj])
-                off_p = np.median(local, axis=0)
-                off_q = _mean_quat(quat_mul(quat_conj(bq[ok, wj]), q[ok]))
-                wq = quat_mul(q, np.broadcast_to(quat_conj(off_q), q.shape))
-                wp = p - quat_apply(wq, off_p)
+                # two passes: a controller that is tracked but not in the hand (put down on a
+                # table) is far from the solver wrist; drop those frames from the offset fit
+                # and from the anchor target
+                for _ in range(2):
+                    local = quat_apply(quat_conj(bq[ok, wj]), p[ok] - bp[ok, wj])
+                    off_p = np.median(local, axis=0)
+                    off_q = _mean_quat(quat_mul(quat_conj(bq[ok, wj]), q[ok]))
+                    wq = quat_mul(q, np.broadcast_to(quat_conj(off_q), q.shape))
+                    wp = p - quat_apply(wq, off_p)
+                    dev = np.linalg.norm(wp - bp[:, wj], axis=-1)
+                    ok_next = ok & (dev < MAX_ANCHOR_DEV)
+                    if ok_next.sum() < fps or np.array_equal(ok_next, ok):
+                        break
+                    ok = ok_next
                 wp = np.where(ok[:, None], wp, bp[:, wj])
                 err = np.linalg.norm(wp[ok] - bp[ok, wj], axis=-1)
                 targets[f"{s_}_arm"] = (wp, ok)
                 calib[f"controller_to_wrist_{s_}"] = {"pos": off_p.round(4).tolist(),
                                                       "quat_wxyz": off_q.round(4).tolist()}
                 report["steps"].append({f"anchor_{s_}_hand": {
-                    "frames": int(ok.sum()), "solver_vs_controller_mm": round(float(np.median(err) * 1e3), 1)}})
+                    "frames": int(ok.sum()), "rejected_frames": int((v & valid & ~ok).sum()),
+                    "solver_vs_controller_mm": round(float(np.median(err) * 1e3), 1)}})
         for limb, (target, _) in targets.items():
             a, b, c, _ = LIMBS[limb]
             k1, k2 = BONES.index((J[a], J[b])), BONES.index((J[b], J[c]))
@@ -578,6 +624,18 @@ def correct_episode(ep: Episode, cfg_all: dict, profile: str | None = None,
         v = ctrl[s][2]
         for jn in js:
             conf[:, J[jn]] *= np.where(v, 1.0, 0.5)
+    if not is_body:
+        # sensor-only profiles: joints whose tracker is missing (or lost on a frame) are only
+        # guessed by SparseBodySolver, so they get the 3-point confidence instead of the profile's
+        guess = (cfg_all.get("profiles", {}).get("hmd_3pt") or cfg)["confidence"]
+        for key, groups in (("pelvis", ("pelvis", "spine")), ("ankles", ("legs", "feet"))):
+            sv = sensor_valid.get(key, np.zeros(T, bool))
+            for j in range(NUM_JOINTS):
+                if JOINT_GROUP[j] in groups:
+                    conf[:, j] = np.where(sv, conf[:, j], np.minimum(conf[:, j], guess[JOINT_GROUP[j]] * valid))
+        if "ankles" not in sensor_valid and "lower" in observed_axes:
+            observed_axes.remove("lower")
+            report["steps"].append({"warning": "no ankle trackers: lower-body labels disabled, legs are guessed"})
     conf = lowpass(conf, fps, 2.0).clip(0.0, 1.0)
 
     out = {
@@ -588,8 +646,8 @@ def correct_episode(ep: Episode, cfg_all: dict, profile: str | None = None,
         "proc/controller/right/pos": ctrl["right"][0], "proc/controller/right/quat": ctrl["right"][1],
     }
     calib["world_alignment"] = {"origin": origin.round(4).tolist(), "yaw_removed_deg": float(np.degrees(yaw0))}
-    return {"arrays": out, "calibration": calib, "report": report, "fps": fps,
-            "observed_axes": cfg.get("observed_axes", ["loco", "lower", "upper"])}
+    report["invalid_runs_s"] = [[round(a / fps, 2), round(b / fps, 2)] for a, b in _runs(~valid)]
+    return {"arrays": out, "calibration": calib, "report": report, "fps": fps, "observed_axes": observed_axes}
 
 
 def _runs(mask):
@@ -637,8 +695,9 @@ def _assign_tracker_roles(trk, win, ep, cfg):
 
 
 def _tracker_targets(trk, roles, win, head_q, floor_z):
-    """Calibrate tracker->joint offsets from the still pose and return joint targets."""
-    pelvis_in, ankles = None, {}
+    """Calibrate tracker->joint offsets from the still pose and return joint targets
+    (pelvis, ankles) plus the per-frame validity of the trackers behind them."""
+    pelvis_in, ankles, ankle_v, sensor_valid = None, {}, {}, {}
     for k, p, q, v in trk:
         role = roles.get(k)
         if role is None:
@@ -651,6 +710,7 @@ def _tracker_targets(trk, roles, win, head_q, floor_z):
             joint_q_off = quat_mul(quat_conj(q_rest), yaw_quat(np.array(yaw_of(_mean_quat(head_q[win])))))
             jq = quat_mul(q, np.broadcast_to(joint_q_off, q.shape))
             ankles[role.split("_")[0]] = (p + quat_apply(q, np.broadcast_to(off, p.shape)), jq)
+            ankle_v[role.split("_")[0]] = v
         elif role == "pelvis":
             yaw_rest = yaw_quat(np.array(yaw_of(_mean_quat(head_q[win]))))
             joint_q_off = quat_mul(quat_conj(q_rest), yaw_rest)
@@ -659,9 +719,12 @@ def _tracker_targets(trk, roles, win, head_q, floor_z):
             off_world = quat_apply(yaw_rest, np.array([0.12, 0.0, 0.0]))
             off = quat_apply(quat_conj(q_rest), off_world)
             pelvis_in = (p + quat_apply(q, np.broadcast_to(off, p.shape)), jq)
+            sensor_valid["pelvis"] = v
     if len(ankles) < 2:
         ankles = None
-    return pelvis_in, ankles
+    else:
+        sensor_valid["ankles"] = ankle_v["left"] & ankle_v["right"]
+    return pelvis_in, ankles, sensor_valid
 
 
 def apply_correction(ep: Episode, cfg_all: dict, profile: str | None = None,

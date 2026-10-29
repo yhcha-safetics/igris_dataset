@@ -19,6 +19,7 @@ from typing import Any
 import torch
 
 from . import constants as C
+from .motion import project_relative
 
 OBS_TERM_DEFINITIONS = {
     "motion_joint_pos": "reference joint_pos[t] (absolute rad) in policy joint order",
@@ -202,7 +203,7 @@ def build_policy_metadata(env, task_id: str = "", checkpoint: str = "", extra: d
         # terminations used for success / failure
         "terminations": term_thresholds,
         "default_root_height": C.DEFAULT_ROOT_HEIGHT,
-        "training_motion_files": list(cmd.motion.files),
+        "training_motion_files": project_relative(cmd.motion.files),  # play_eval passes the run's own list
         "motion_z_offset": float(cmd.cfg.motion_z_offset),
     }
     if extra:

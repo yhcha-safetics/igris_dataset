@@ -94,6 +94,11 @@ class Retargeter:
         self.balance = bal if bal.get("enabled", False) else None
         if self.balance:
             self.com_task = mink.ComTask(cost=np.array([float(bal.get("cost", 50.0))] * 2 + [0.0]))
+        # the IK itself respects the output range (incl. Isaac soft limits): clipping only afterwards
+        # moves a contact foot off the target the IK just solved (pelvis height absorbs it instead)
+        lo, hi = self.reference_range()
+        for i, n in enumerate(self.robot.joint_names):
+            self.model.jnt_range[self.robot.jid(n)] = [lo[i], hi[i]]
         self.limits = [mink.ConfigurationLimit(self.model)]
         vmax = sc.get("velocity_limit")
         if vmax:
@@ -111,7 +116,10 @@ class Retargeter:
         return out
 
     # ------------------------------------------------------------------------------------
-    def scale_human(self, pos: np.ndarray, quat: np.ndarray, stature: float | None) -> np.ndarray:
+    def scale_human(self, pos: np.ndarray, quat: np.ndarray, stature: float | None,
+                    ratios: dict | None = None) -> np.ndarray:
+        """Scale human joints to robot proportions. `ratios` (kinematic mode) reuses ratios measured
+        earlier, e.g. at the calibration of a live stream (see self.scale_info)."""
         sc = self.cfg.get("scaling", {})
         mode = sc.get("mode", "kinematic")
         root = J[self.cfg["robot"].get("human_root", "pelvis")]
@@ -129,6 +137,15 @@ class Retargeter:
             self.scale_info = {"mode": "gmr", "ratio": ratio}
             return out
         # kinematic scaling from segment-length ratios
+        r = dict(ratios) if ratios is not None else self._kinematic_ratios(pos)
+        out = np.zeros_like(pos)
+        out[:, root] = pos[:, root] * r["leg"]
+        for p, c in BONES:  # BONES are in topological order
+            out[:, c] = out[:, p] + r[_BONE_GROUP[c]] * (pos[:, c] - pos[:, p])
+        self.scale_info = {"mode": "kinematic", "ratios": {k: round(float(v), 4) for k, v in r.items()}}
+        return out
+
+    def _kinematic_ratios(self, pos: np.ndarray) -> dict:
         L = self.robot.segment_lengths()
         hum = np.median(np.stack([np.linalg.norm(pos[:, c] - pos[:, p], axis=-1) for p, c in BONES], -1), 0)
         bl = {(p, c): hum[k] for k, (p, c) in enumerate(BONES)}
@@ -145,14 +162,8 @@ class Retargeter:
         human_trunk = np.median(np.linalg.norm(pos[:, J["neck"]] - pos[:, J["pelvis"]], axis=-1))
         human_hipw = np.median(np.linalg.norm(pos[:, J["left_hip"]] - pos[:, J["right_hip"]], axis=-1))
         human_shw = np.median(np.linalg.norm(pos[:, J["left_shoulder"]] - pos[:, J["right_shoulder"]], axis=-1))
-        r = {"leg": robot_leg / human_leg, "arm": robot_arm / human_arm, "trunk": L["trunk"] / human_trunk,
-             "hip_width": L["hip_width"] / human_hipw, "shoulder_width": L["shoulder_width"] / human_shw}
-        out = np.zeros_like(pos)
-        out[:, root] = pos[:, root] * r["leg"]
-        for p, c in BONES:  # BONES are in topological order
-            out[:, c] = out[:, p] + r[_BONE_GROUP[c]] * (pos[:, c] - pos[:, p])
-        self.scale_info = {"mode": "kinematic", "ratios": {k: round(float(v), 4) for k, v in r.items()}}
-        return out
+        return {"leg": robot_leg / human_leg, "arm": robot_arm / human_arm, "trunk": L["trunk"] / human_trunk,
+                "hip_width": L["hip_width"] / human_hipw, "shoulder_width": L["shoulder_width"] / human_shw}
 
     def _pin_contact_feet(self, spos, quat, contact, fps):
         """Feet in contact: ankle at the robot's flat-sole height, foot orientation yaw-only.
@@ -295,6 +306,14 @@ class Retargeter:
         res.diagnostics["scaling"] = getattr(self, "scale_info", {})
         return res
 
+    def reference_range(self) -> tuple[np.ndarray, np.ndarray]:
+        """Joint clip range of the output (postprocess.joint_margin, postprocess.isaac_soft_limits)."""
+        from ..isaaclab_ext.constants import SOFT_JOINT_POS_LIMIT_FACTOR
+
+        pp = self.cfg.get("postprocess", {})
+        soft = SOFT_JOINT_POS_LIMIT_FACTOR if pp.get("isaac_soft_limits", False) else None
+        return self.robot.reference_range(float(pp.get("joint_margin", 0.0)), soft)
+
     def postprocess(self, qpos, fps, contact):
         pp = self.cfg.get("postprocess", {})
         q = qpos.copy()
@@ -303,9 +322,8 @@ class Retargeter:
             q[:, :3] = lowpass(q[:, :3], fps, hz)
             q[:, 3:7] = lowpass_quat(q[:, 3:7], fps, hz)
             q[:, 7:] = lowpass(q[:, 7:], fps, hz)
-        margin = float(pp.get("joint_margin", 0.0))
-        rng = self.robot.jnt_range
-        q[:, 7:] = np.clip(q[:, 7:], rng[:, 0] + margin, rng[:, 1] - margin)
+        lo, hi = self.reference_range()
+        q[:, 7:] = np.clip(q[:, 7:], lo, hi)
         ratio = pp.get("max_speed_ratio")
         if ratio:  # rate-limit every joint to a fraction of its actuator speed limit
             from ..sim.mujoco_eval import load_joint_params

@@ -22,6 +22,7 @@ ap.add_argument("--export-review", default=None)
 ap.add_argument("--import-review", default=None)
 ap.add_argument("--train", default=None, help="train LearnedLabeler on reviewed episodes, save to this path")
 ap.add_argument("--with-synthetic", action="store_true", help="add synthetic clips to the training set")
+ap.add_argument("--force", action="store_true", help="relabel episodes whose labels were already reviewed")
 a = ap.parse_args()
 paths = _common.episode_paths(a.paths)
 with open(_common.ROOT / "configs" / "labels.yaml", encoding="utf-8") as f:
@@ -39,18 +40,20 @@ if a.train:
     Path(a.train).parent.mkdir(parents=True, exist_ok=True)
     review.train_learned(eps, syn, a.train)
     print("saved", a.train)
-elif a.import_review:
+elif a.import_review or a.export_review:
+    if len(paths) != 1:
+        raise SystemExit(f"--import-review / --export-review take exactly one episode .h5 (got {len(paths)})")
     ep = Episode.load(paths[0])
-    review.import_review_csv(ep, a.import_review, rules)
-    ep.save(paths[0])
-    print("applied", a.import_review, "->", paths[0], "(marked reviewed)")
-elif a.export_review:
-    ep = Episode.load(paths[0])
-    review.export_review_csv(ep, a.export_review)
-    print("wrote", a.export_review)
+    if a.import_review:
+        review.import_review_csv(ep, a.import_review, rules)
+        ep.save(paths[0])
+        print("applied", a.import_review, "->", paths[0], "(marked reviewed, segments rebuilt)")
+    else:
+        review.export_review_csv(ep, a.export_review)
+        print("wrote", a.export_review)
 else:
     for p in paths:
-        segs = stage_label(p, rules, a.learned)
+        segs = stage_label(p, rules, a.learned, force=a.force)
         print(f"{p}: {len(segs)} segments")
         for s in segs:
             flag = "  <- review" if s["needs_review"] else ""

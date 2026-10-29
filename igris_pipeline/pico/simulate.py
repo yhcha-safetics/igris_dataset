@@ -8,6 +8,8 @@ correlated drift on estimated joints, outlier spikes, packet drops, foot skating
 """
 from __future__ import annotations
 
+import time
+
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
@@ -63,6 +65,7 @@ class SimulatedXRTSource:
         self.realtime = realtime
         self._build(drop_prob, outlier_prob, solver_scale)
         self._i = 0
+        self._wall0 = None
 
     # -- the XRTSource interface -------------------------------------------------------
     def open(self):
@@ -72,6 +75,18 @@ class SimulatedXRTSource:
         pass
 
     def poll(self) -> XRFrame | None:
+        if self.realtime:
+            # behave like the live service: packets appear on the clip's clock, a slow consumer
+            # gets the newest packet (older ones are skipped), None until the next one is due
+            now = time.perf_counter()
+            if self._wall0 is None:
+                self._wall0 = now
+            due = int(np.searchsorted(self.t_ns, self.t_ns[0] + (now - self._wall0) * 1e9, side="right")) - 1
+            if due < self._i:
+                if self._i >= self.T:
+                    raise StopIteration
+                return None
+            self._i = due
         while self._i < self.T and self.dropped[self._i]:
             self._i += 1
         if self._i >= self.T:

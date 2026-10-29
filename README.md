@@ -1,11 +1,12 @@
-# PICO 4 → IGRIS-C 모방학습 데이터셋 파이프라인
+# PICO 4 / 4 Ultra → IGRIS-C 모방학습 데이터셋 파이프라인
 
-PICO 4 VR 헤드셋 + 모션 트래커로 사람 동작을 수집해, 로브로스(Robros) IGRIS-C 휴머노이드의
+PICO 4 / PICO 4 Ultra VR 헤드셋 + 모션 트래커로 사람 동작을 수집해, 로브로스(Robros) IGRIS-C 휴머노이드의
 모방학습(모션 트래킹 RL)용 데이터셋을 만들고 평가하는 파이프라인입니다.
 
 ```
 [1-1] PICO 연결/장비 감지 ─ XRoboToolkit ─> raw/*.h5 (24관절 바디, 헤드셋, 컨트롤러, 트래커)
 [1-2] 트래커 구성별 보정   ─ 캘리브레이션, 이상치, 필터, 뼈 길이, 센서 앵커, 발 접지 ─> proc/*
+[1-3] 실시간 뷰어          ─ 헤드셋 스트림 → 프레임 단위 리타겟 → MuJoCo (보면서 녹화 가능)
 [2]   자동 라벨링          ─ 이동(loco) / 하체(lower) / 상체(upper) 3축 라벨 + 검수 도구 ─> labels/*
 [3]   IGRIS-C 리타겟팅     ─ mink 2단계 IK (Robros GMR 테이블 기반) + 균형/접지 ─> motions/*.npz|pkl|csv
 [4]   평가                 ─ MuJoCo 물리 타당성 / Isaac Lab 모션 트래킹 RL / MuJoCo sim2sim
@@ -15,37 +16,84 @@ PICO 4 VR 헤드셋 + 모션 트래커로 사람 동작을 수집해, 로브로�
 
 | 용도 | 환경 | 비고 |
 |---|---|---|
-| 수집·보정·라벨링·리타겟팅·MuJoCo 평가 | `.venv` (Python 3.10) | `pip install -r requirements.txt` |
-| Isaac Lab 학습/평가 | conda `isaaclab` (Python 3.11) | Isaac Sim 5.1 + Isaac Lab 2.3.2 (`C:\IsaacLab`) |
+| 수집·보정·라벨링·리타겟팅·MuJoCo 평가·실시간 뷰어 | `.venv` (Python 3.10) | `pip install -r requirements.txt` |
+| Isaac Lab 학습/평가 | conda `isaaclab` (Python 3.11, `%USERPROFILE%\anaconda3\envs\isaaclab`) | Isaac Sim 5.1 + Isaac Lab 2.3.2 (`C:\IsaacLab`) |
 
 ```powershell
-C:\Users\c\AppData\Local\Programs\Python\Python310\python.exe -m venv .venv
+& "$env:LOCALAPPDATA\Programs\Python\Python310\python.exe" -m venv .venv   # winget install Python.Python.3.10 --scope user
 .venv\Scripts\python -m pip install -r requirements.txt
 ```
 
+Isaac Lab 환경(Windows 11, RTX 50 시리즈는 torch cu128 빌드 필요):
+
+```powershell
+# (관리자 PowerShell 1회) Isaac Sim pip 휠은 Windows 긴 경로 지원이 필요
+Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' -Name LongPathsEnabled -Value 1 -Type DWord
+conda create -y -n isaaclab python=3.11
+$ISAAC = "$env:USERPROFILE\anaconda3\envs\isaaclab\python.exe"
+& $ISAAC -m pip install torch==2.7.0 torchvision==0.22.0 --index-url https://download.pytorch.org/whl/cu128
+& $ISAAC -m pip install "isaacsim[all,extscache]==5.1.0" --extra-index-url https://pypi.nvidia.com
+git clone --branch v2.3.2 https://github.com/isaac-sim/IsaacLab.git C:\IsaacLab
+# flatdict 4.0.1(Isaac Lab 의존성)은 pkg_resources가 없는 최신 setuptools로는 빌드되지 않음
+& $ISAAC -m pip install "setuptools<80"; & $ISAAC -m pip install flatdict==4.0.1 --no-build-isolation
+# conda env를 활성화한 셸(또는 CONDA_PREFIX 설정)에서, isaaclab.bat는 전체 경로로 실행
+C:\IsaacLab\isaaclab.bat --install rsl_rl
+& $ISAAC -m pip show isaaclab   # 핵심 패키지(0.54.x)가 설치됐는지 확인 (없으면: & $ISAAC -m pip install -e C:\IsaacLab\source\isaaclab)
+& $ISAAC -m pip install "tensordict<0.10"   # 최신 tensordict는 torch 2.8+ 전용 (torch 2.7에서 rsl_rl import 실패)
+# rsl_rl(GitPython)은 git을 PATH에서 찾으므로 학습 셸 PATH에 C:\Program Files\Git\cmd 포함
+```
+Isaac Sim을 처음 import할 때 NVIDIA Omniverse EULA 동의를 묻습니다. 아래 명령들은 `$env:OMNI_KIT_ACCEPT_EULA="YES"`로 동의한 상태에서 실행합니다.
+
 외부 자산은 이 저장소에 포함하지 않습니다.
-`.venv\Scripts\python scripts\fetch_third_party.py`를 실행하면 검증된 커밋으로 `third_party/`에 clone 됩니다.
+`.venv\Scripts\python scripts\fetch_third_party.py`를 실행하면 검증된 커밋으로 `third_party/`에 clone 됩니다
+(GMR은 이전 고정 커밋 `e47d4f8`이 upstream에서 사라져 `1281a40`으로 고정. 관절·바디 이름, 31 DOF, IK 테이블 가중치가 코드와 일치함을 확인).
 코드는 실행하지 않고 모델 파일만 사용합니다.
 - `third_party/robros_GMR` — robrosinc/GMR (MIT). IGRIS-C MJCF (`assets/robros_igris_c_v2/igris_c_v2.xml`, 31 DOF)와
-  PICO→IGRIS-C IK 테이블 (`ik_configs/xrobot_to_igris_c.json`)
+  PICO→IGRIS-C IK 테이블 (`general_motion_retargeting/ik_configs/xrobot_to_igris_c.json`)
 - `third_party/robros_lab_public` — robrosinc/robros_lab_public. Isaac Lab용 URDF (손목·목 고정, 23 DOF)와
   액추에이터 파라미터 (`robros.py`). 이 파라미터를 `configs/igris_c_actuators.yaml`로 옮겨 사용
 
-> **Isaac Gym**: NVIDIA가 지원을 종료했고 Linux 전용(Python ≤3.8)이라 이 Windows 10 PC에서는 쓸 수 없습니다.
-> 같은 역할(GPU 병렬 RL)은 Isaac Lab이 대신합니다. Isaac Lab 3.0 / Isaac Sim 6.x는 Windows 11 이상만
-> 지원하므로 현재 설치된 Isaac Lab 2.3.2 / Isaac Sim 5.1을 그대로 씁니다.
+> **Isaac Gym**: NVIDIA가 지원을 종료했고 Linux 전용(Python ≤3.8)이라 Windows에서는 쓸 수 없습니다.
+> 같은 역할(GPU 병렬 RL)은 Isaac Lab이 대신합니다(`gymnasium`은 Isaac Lab에 포함).
+> 이 PC는 Windows 11이라 Isaac Lab 3.x / Isaac Sim 6.x도 설치할 수 있지만, 코드가 Isaac Lab 2.3 / rsl-rl 3 API
+> (TensorDict 관측, `body_link_*`, `obs_groups` 등)에 맞춰져 있어 2.3.2 / 5.1을 그대로 씁니다.
 
 ## 1-1. PICO 4 연결과 장비·트래커 감지
 
 **연결 방법 (XRoboToolkit)**
 
-1. PC: `XRoboToolkit-PC-Service` Windows 빌드를 받아 압축을 풉니다.
-   - `VC_redist.x64.exe`를 설치합니다.
-   - `install.bat`를 관리자 권한으로 실행합니다(방화벽 규칙 추가).
+1. PC: `XRoboToolkit-PC-Service` Windows 빌드를 받아 압축을 풉니다(이 PC: `%USERPROFILE%\Downloads\XRoboToolkit-PC-Service.win`).
+   - `VC_redist.x64.exe`를 설치합니다(이미 14.36 이상이 있으면 생략).
+   - 방화벽 규칙을 추가합니다. 동봉된 `install.bat`는 정의되지 않은 `%CUR_DIR%`를 써서 규칙의 프로그램 경로가 틀리므로,
+     관리자 PowerShell에서 직접 추가하세요:
+     `New-NetFirewallRule -DisplayName picobusinesssuit -Direction Inbound -Action Allow -Program "<폴더>\RoboticsServiceProcess.exe" -Profile Any`
    - `runService.bat`로 서비스를 실행합니다.
-2. 헤드셋: `XRoboToolkit-PICO-1.1.1-SDK29.apk`를 `adb install`로 설치합니다(PICO 4 / Android API 29용).
+2. 헤드셋: XRoboToolkit Unity Client APK를 `adb install`로 설치합니다
+   (adb: `%USERPROFILE%\Downloads\platform-tools-latest-windows\platform-tools`, 헤드셋 개발자 모드 + USB 디버깅 허용).
+   - v1.1.1 빌드는 두 가지입니다(`aapt dump badging`으로 확인). 둘 다 같은 패키지(`com.xrobotoolkit.client`)라 하나만 설치됩니다.
+     - `XRoboToolkit-PICO-1.1.1-SDK29.apk`: minSdk 29 / targetSdk 32. 구 OS(API 29)의 PICO 4에도 설치 가능
+     - `XRoboToolkit-PICO-1.1.1.apk`: minSdk 30 / targetSdk 31
+   - 이 프로젝트의 PICO 4 Ultra(A9210, PICO OS 5.15.7, Android 14 / API 34)에는 SDK29 빌드가 설치되어 있습니다.
+   - 받은 APK: `%USERPROFILE%\Downloads\XRoboToolkit-APK\`. `adb shell getprop ro.build.version.sdk`로 헤드셋 API 레벨을 확인할 수 있습니다.
    - 앱에서 PC IP를 입력합니다(헤드셋 → PC TCP 63901).
-   - 바디 트래킹을 쓰려면 Motion Tracker를 **Full body**로 설정합니다.
+     - USB 연결 시 권장: 스크립트에 `--usb`를 주면 `adb reverse tcp:63901 tcp:63901`을 걸고, 앱에는 **127.0.0.1**을 입력합니다.
+       Wi-Fi·방화벽·헤드셋 절전과 무관하고 지연이 작습니다.
+     - Wi-Fi: 헤드셋에서 **PC로 TCP 63901이 닿는 주소**를 입력합니다(방화벽 규칙 필요). 같은 서브넷일 필요는 없습니다.
+       예: PC는 교내 이더넷(163.180.124.41), 헤드셋은 공유기 Wi-Fi(192.168.0.x)인 이 구성에서는 공유기가 교내망으로 라우팅하므로
+       앱에 **PC 이더넷 IP**를 넣으면 연결됩니다(헤드셋 → PC 방향이라 NAT도 문제없음). 확인:
+       `adb shell "nc -w 3 <PC IP> 63901 </dev/null; echo rc=$?"` → `rc=0`이면 연결 가능. ping은 Windows가 ICMP를 막아 실패해도 무관합니다.
+       서비스의 자동 탐색(브로드캐스트)은 다른 서브넷에 닿지 않으므로 IP는 직접 입력합니다.
+   - 사이드로드한 앱은 PICO 라이브러리 기본 목록이 아니라 **출처 필터 → "알 수 없는 출처(Unknown Sources)"**에 나옵니다
+     (adb 설치라 `installerPackageName=null`).
+   - 헤드셋을 벗으면 PICO가 앱을 일시정지해 연결이 끊깁니다. 수집·확인 중에는 헤드셋을 착용한 상태로 두세요.
+   - PC 쪽 한 번에 준비: `powershell -ExecutionPolicy Bypass -File scripts\pico_start.ps1 [-Live] [-Record s01]`
+     (서비스 실행, USB면 터널 + 헤드셋 앱 실행, 입력할 IP 안내, `-Live`면 실시간 뷰어)
+   - 앱의 **Tracking에서 Head와 Controller를 체크**합니다. 꺼져 있으면 연결·패킷은 오지만 포즈가 모두 0입니다.
+     컨트롤러는 녹화 A/B 버튼과 손목 앵커에도 쓰입니다.
+   - 바디 트래킹을 쓰려면 Motion Tracker를 **Full body**로 설정합니다(Num = 착용 트래커 수).
+     트래커를 발목에 차고 PICO Motion Tracker 앱에서 착용 캘리브레이션을 마쳐야 바디 데이터가 나옵니다.
+     안 되면 `adb logcat | findstr Swifter_StatusInfo`에서 `WearCalibStatus:0` / `m_bTrackInit:0`인지 확인하세요.
+     (소비자판 PICO 4 Ultra에서 바디 데이터가 오지 않으면 enterprise 기능 활성화 여부를 확인하세요. NVIDIA Isaac Teleop 문서에 그런 언급이 있으나 미검증)
    - **Send**를 켭니다.
 3. 모션 트래커 캘리브레이션: 헤드셋을 켤 때마다 PICO의 Motion Tracker 앱에서 다시 해야 합니다.
 4. 감지 실행:
@@ -98,11 +146,15 @@ PICO 바디 트래킹은 **보정된 트래커가 최소 2개** 있어야 동작
 - 필터 컷오프(추정 관절일수록 더 강하게 평활)
 - 센서 앵커(손 ↔ 컨트롤러, 발목 ↔ 트래커)
 
-1. 균일 레이트(50 Hz)로 리샘플합니다. 0.25 s 이하 결손은 보간하고, 더 긴 결손은 invalid로 둡니다.
+1. 균일 레이트(50 Hz)로 리샘플합니다. 0.25 s 이하 결손은 보간하고, 더 긴 결손은 연속 보간한 뒤 invalid(`proc/valid`)로 둡니다.
+   invalid 구간은 신뢰도 0이 되고 3단계 내보내기에서 잘려 나갑니다. 헤드셋 시계가 되돌아가거나 중복된 타임스탬프는 버립니다.
+   바디 프로파일인데 바디 데이터가 20% 미만이면(트래커 꺼짐 등) `sparse_trackers`/`hmd_3pt`로 자동 전환합니다.
 2. 이상치(스파이크)를 제거합니다(robust median + 속도 기준).
    `sparse`/`hmd_3pt` 프로파일은 센서 포즈로 24관절을 재구성합니다(`SparseBodySolver`).
-3. 정지 구간에서 캘리브레이션합니다. 바닥 높이, 정면 방향, 신장, 뼈 길이, 컨트롤러→손목 오프셋을 구하고,
-   PICO 관절 좌표계를 점검합니다.
+   이때 실제로 있는(그리고 그 프레임에 유효한) 트래커만 해당 부위의 신뢰도를 올립니다. 발목 트래커가 없으면 하체 라벨을 끕니다.
+3. 정지 구간에서 캘리브레이션합니다. 바닥 높이, 정면 방향(±180°에서도 깨지지 않는 원형 중앙값), 신장, 뼈 길이,
+   컨트롤러→손목 오프셋을 구하고, PICO 관절 좌표계를 점검합니다(T-포즈 편차 중앙값이 15°를 넘으면 리포트에 경고).
+   손에서 15 cm 이상 떨어진 컨트롤러(내려놓은 경우)는 오프셋 추정과 손목 앵커에서 제외합니다.
 4. 관절 그룹별 zero-phase 저역통과 필터를 적용합니다.
 5. 센서 기준 뼈 길이를 정규화합니다. 정확한 관절(머리, 컨트롤러 기준 손목, 발목)은 고정하고,
    팔·다리는 2-bone IK로 다시 풉니다. 거의 펴진 팔다리는 IK가 노이즈를 크게 증폭하므로(무릎 1 cm 오차 → 9 cm)
@@ -131,6 +183,22 @@ PICO 바디 트래킹은 **보정된 트래커가 최소 2개** 있어야 동작
   실제 컨트롤러 오프셋은 `body_*` 세션의 캘리브레이션 출력(`controller_to_wrist_*`)을
   `tracker_profiles.yaml`의 `sensor_offsets`에 복사해 맞추세요.
 
+## 1-3. 실시간 뷰어 (PICO → IGRIS-C, MuJoCo)
+
+`igris_pipeline/live.py`, `scripts/live_view.py`. 헤드셋 스트림을 프레임 단위로 리타겟해 MuJoCo 창에 로봇(과 사람 스켈레톤)을 띄웁니다.
+
+```powershell
+.venv\Scripts\python scripts\live_view.py                                  # 실기 (PC 서비스 + 앱 Full body + Send)
+.venv\Scripts\python scripts\live_view.py --simulate body_2trk             # 헤드셋 없이 합성 스트림을 실시간 속도로 재생
+.venv\Scripts\python scripts\live_view.py --record s01 --subject-height 1.72   # 보면서 녹화 (오른손 A 시작/정지, B 마커)
+```
+
+- 시작 후 `--calib-s`(기본 3 s) 동안 **움직일 방향을 보고 T-포즈로 정지**합니다. 바닥, 정면, 원점, 스케일 비율을 이 구간에서 정합니다.
+- 배치 단계의 인과(causal) 버전입니다: 관절 그룹별 1차 저역통과, 프로파일의 발 접촉 임계값과 평발 고정,
+  `Retargeter.solve_frame`(균형 단계 포함), 관절 범위·속도 제한, 바닥 접지.
+- RTX 5080 PC에서 IK는 프레임당 평균 약 5 ms, p95 약 9 ms입니다(헤드셋 72–90 Hz보다 빠름).
+- 바디 트래킹 프로파일(`body_2trk`/`body_3trk`)만 지원합니다. 데이터셋은 녹화 파일로 배치 파이프라인(`run_pipeline.py`)을 돌려 만듭니다.
+
 ## 2. 자세 라벨링 자동화
 
 `igris_pipeline/labeling/`, `configs/labels.yaml`, `scripts/04_label.py`
@@ -145,8 +213,11 @@ PICO 바디 트래킹은 **보정된 트래커가 최소 2개** 있어야 동작
   세그먼트와 확률을 만들고, 확률이 낮은 구간은 **검수 필요**로 표시합니다.
 - 학습형 라벨러(HistGradientBoosting)를 규칙 점수와 블렌딩할 수 있습니다.
   검수 완료 에피소드와 합성 데이터로 학습합니다.
-- 검수 흐름: `--export-review csv` → 스프레드시트에서 수정 → `--import-review csv`(reviewed 표시) → `--train`.
+- 검수 흐름: `--export-review csv` → 스프레드시트에서 수정 → `--import-review csv`(reviewed 표시, 세그먼트 재생성) → `--train`.
+  - CSV는 UTF-8과 cp949(한국어 Excel의 기본 CSV 저장) 모두 읽습니다.
+  - 검수된 에피소드는 `run_pipeline.py`를 다시 돌려도 라벨을 덮어쓰지 않습니다(다시 자동 라벨링하려면 `04_label.py --force`).
   타임라인 PNG(`reports/*_labels.png`)도 생성합니다.
+- 특징은 머리 관절 높이로 정규화합니다. 보정 단계의 신장(정수리 기준)은 학습·추론 모두 같은 기준(−0.12 m)으로 바꿔 씁니다.
 
 정확도는 처음 보는 무작위 동작 시퀀스, 노이즈가 있는 `body_2trk` 데이터, 경계 ±0.75 s 제외 조건에서 측정했습니다
 (`tests/eval_labeling.py`).
@@ -154,8 +225,11 @@ PICO 바디 트래킹은 **보정된 트래커가 최소 2개** 있어야 동작
 | 축 | 규칙만 (acc / macro-F1) | 규칙 + 학습 (acc / macro-F1) |
 |---|---|---|
 | loco | 1.000 / 1.000 | 1.000 / 1.000 |
-| lower | 0.965 / 0.932 | 0.977 / 0.950 |
-| upper | 0.921 / 0.908 | 0.971 / 0.956 |
+| lower | 0.965 / 0.932 | 0.977 / 0.952 |
+| upper | 0.921 / 0.908 | 0.971 / 0.952 |
+
+합성 생성기는 `kneel`, `raise_l/r`, `reach_l/r` 동작을 만들지 못하므로 이 다섯 라벨은 위 정확도에 포함되지 않습니다(규칙만 있고 미검증).
+학습형 라벨러도 이 라벨을 본 적이 없어 블렌딩 시 점수를 낮춥니다. 실측 검수 데이터로 학습하기 전에는 `--learned` 없이 쓰는 편이 안전합니다.
 
 ## 3. IGRIS-C 리타겟팅
 
@@ -184,9 +258,16 @@ PICO 바디 트래킹은 **보정된 트래커가 최소 2개** 있어야 동작
     - 몸통(`base_link`) orientation 가중치는 50으로 둡니다.
     - 효과: 로봇이 따라 할 수 없는 팔 비틀림 때문에 몸통이 기울던 문제(전방 뻗기에서 36° → 9.5°)를 줄였습니다.
 - 출력 형식:
-  - `motions/ep_XXXX.npz`: Isaac Lab 트래킹용. 50 fps, joint/body pos·quat(wxyz)·vel.
+  - `motions/ep_XXXX.npz`: Isaac Lab 트래킹용. 50 fps, joint/body pos·quat(wxyz)·vel. meta의 라벨 세그먼트는 파일의 fps 기준 프레임입니다.
   - `.pkl`: Robros IGRIS-C canonical GMR 형식.
-  - `.csv`: BeyondMimic/mjlab 형식.
+  - `.csv`: BeyondMimic/mjlab 형식(헤더 없음, MJCF 31관절 순서).
+  - 트래킹 결손(`proc/valid`=False)이 있으면 유효 구간별로 `ep_XXXX_p0`, `_p1`… 로 나눠 내보냅니다(2 s 미만 구간은 버림).
+    결손이 없으면 지금처럼 `ep_XXXX` 하나입니다. 어떤 구간이 나갔는지는 `reports/*_retarget.json`의 `motion_parts`에 있습니다.
+- **Isaac soft 한계 안의 레퍼런스**: Isaac은 `soft_joint_pos_limit_factor=0.9`(URDF 범위 중앙 ±45%) 밖을 매 스텝 감점하고 리셋 때 잘라냅니다.
+  그래서 IK의 관절 한계 자체를 이 soft 범위(+0.02 rad 여유)로 둡니다(`postprocess.isaac_soft_limits`).
+  예: 무릎 하한 0.02 → 0.114 rad(선 자세에서 약 6.5° 굽힘), 팔꿈치 상한 −0.02 → −0.105 rad, 고관절 신전 상한 0.50 → 0.40 rad.
+  사후 클리핑만 하면 접촉 중인 발이 밀려(발 미끄러짐 0.042 → 0.069 m/s) IK 단계에 넣었고, 결과는 0.039 m/s / 방향 오차 6.35°로 이전과 같은 수준입니다.
+- 참고: 관절 범위는 여유를 두고 클리핑하고 속도는 0.8배로 제한한 뒤 내보내므로, 아래 "관절 범위 위반 0 / 속도 0.80배"는 구성상 항상 성립합니다.
 
 시뮬레이션 `body_2trk` 데이터에서의 비교(`tests/eval_retarget.py`, `tests/eval_balance.py`):
 
@@ -214,7 +295,8 @@ PICO 바디 트래킹은 **보정된 트래커가 최소 2개** 있어야 동작
 `igris_pipeline/sim/mujoco_eval.py`, `scripts/06_eval_mujoco.py`. **라벨 구간별로** 리포트합니다.
 
 - **기구학**: 관절 한계 포화, 액추에이터 속도 한계 초과, 자기충돌 깊이, 바닥 관통.
-- **정적 균형**: CoM 투영이 지지 다각형 안에 있는 비율과 여유(cm).
+- **정적 균형**: 준정적 프레임(CoM 수평 속도 < 0.15 m/s)에서 CoM 투영이 지지 다각형 안에 있는 비율과 여유(cm).
+  보행처럼 동적인 프레임은 원래 지지면 밖에 CoM이 있으므로 제외합니다(전체 프레임 기준 값은 `com_in_support_ratio_all`).
 - **하네스 PD 재생**: 200 Hz, implicit PD 서보로 재생하고, 베이스를 가상 스프링으로 기준 궤적에 붙잡습니다.
   하네스 힘(체중 대비 %)이 **"외부 도움이 얼마나 필요한 클립인지"**를 나타냅니다. 토크 포화와 MPKPE도 함께 봅니다.
 - **자유 재생**(`--free`): Robros 게인으로 개루프 재생합니다. 균형 제어가 없으므로 정지 자세에서도 약 1.6 s에 넘어지며,
@@ -238,6 +320,9 @@ PICO 바디 트래킹은 **보정된 트래커가 최소 2개** 있어야 동작
   - t=0 관측과 action→target이 Isaac과 1e-7 이내로 일치하는지 `check_obs_parity.py`로 검증합니다.
 - **액션 모드**: `--action_mode residual`을 권장합니다(`q_target = q_ref + 0.25·a`).
   - 기본값은 BeyondMimic 방식 `absolute`입니다.
+  - `--resume <ckpt>`는 그 run의 `params/overrides.json`(액션 모드·스케일·z 오프셋)과 `params/motions.txt`를 이어받습니다.
+- **경로**: `params/motions.txt`와 `policy.json`의 `training_motion_files`는 상대경로로 저장하므로, `logs/`와 `data/`를 함께 옮기면 다른 PC에서도 동작합니다.
+- **평가 일관성**: 두 평가기 모두 종료(넘어짐) 스텝은 점수에 넣지 않습니다(이전에는 MuJoCo만 넣어 completion이 1/T 높았음).
 
 300 iteration A/B 결과(4096 env, 시뮬레이션 샘플 40.5 s 클립, model_299, `logs/isaaclab/igris_c_tracking/ab_absolute_vs_residual_s42.md`):
 
@@ -257,7 +342,7 @@ PICO 바디 트래킹은 **보정된 트래커가 최소 2개** 있어야 동작
   전역 표류가 남으면 xy 드리프트 종료 조건을 넣거나 anchor 위치 보상의 std를 넓히는 것을 검토하세요.
 
 ```powershell
-$env:OMNI_KIT_ACCEPT_EULA="YES"; $ISAAC="C:\ProgramData\Anaconda3\envs\isaaclab\python.exe"
+$env:OMNI_KIT_ACCEPT_EULA="YES"; $ISAAC="$env:USERPROFILE\anaconda3\envs\isaaclab\python.exe"
 # 샘플 모션(data/는 저장소에 없음) 만들기:
 .venv\Scripts\python scripts\run_pipeline.py data\demo_body2trk --simulate body_2trk --subject-height 1.72
 mkdir data\sample\motions -Force; copy data\demo_body2trk\motions\ep_0000.npz data\sample\motions\sim_body2trk_full.npz

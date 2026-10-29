@@ -1,24 +1,31 @@
 """Episode container and HDF5 schema shared by every pipeline stage.
 
-Layout of one episode file (``data/<session>/<episode>.h5``)::
+Layout of one episode file (``data/<session>/raw/ep_XXXX.h5``). Positions in metres, world Z-up,
++X forward, quaternions wxyz (converted from PICO's Y-up xyzw by pico/frames.py)::
 
-    attrs: schema_version, fps, source, subject, created, device_profile(json),
-           tracker_profile, calibration(json)
-    raw/t                     (T,)      seconds, device clock
-    raw/body/pos              (T,24,3)  PICO body joints, world Z-up, meters
-    raw/body/quat             (T,24,4)  wxyz
-    raw/body/valid            (T,)      bool, body solver produced data
-    raw/headset/pose          (T,7)     xyz + wxyz
-    raw/controller/{left,right}/pose   (T,7)
-    raw/controller/{left,right}/valid  (T,)
-    raw/tracker/pose          (T,K,7)   motion trackers (object-tracking mode)
-    raw/tracker/valid         (T,K)
-    proc/body/pos|quat        corrected skeleton (stage 1-2)
-    proc/body/confidence      (T,24)    per-joint confidence 0..1
-    labels/frame              (T,)      int label id per frame (stage 2)
-    labels/segments           json attr list of {start,end,label,score}
-    retarget/<robot>/qpos     (T,nq)    root xyz + root wxyz + joint angles (stage 3)
-    retarget/<robot>/...      joint_names attr, fps attr, ik residuals
+    attrs: schema_version, fps, created, subject, tracker_profile, recorded_at, [subject_height],
+           device_profile(json), tracker_serials(json), events(json: [t_s, "marker"])
+    raw/t, raw/t_ns           (T,)      seconds from the first packet / headset clock in ns
+    raw/headset/{pos,quat,valid}                    (T,3) (T,4) (T,)
+    raw/controller/{left,right}/{pos,quat,valid}    (T,3) (T,4) (T,)
+    raw/body/{pos,quat}       (T,24,3) (T,24,4)  PICO body joints (skeleton.py order)
+    raw/body/valid            (T,)      a fresh body-solver packet arrived with this frame
+    raw/body/joint_ts         (T,24)    per-joint IMU timestamps
+    raw/tracker/{pos,quat,valid}  (T,3,3) (T,3,4) (T,3)  object-mode trackers (tracker_serials order)
+    raw/buttons/{A,B,X,Y,left_trigger,right_trigger,left_grip,right_grip}  (T,)
+    raw/hand/{left,right}/{pos,quat,active}  (T,26,3) (T,26,4) (T,)   only with --hands
+    proc/t                    (T',)     uniform rate (group attr proc.fps), stage 1-2
+    proc/body/{pos,quat}      (T',24,3) (T',24,4) corrected, world-aligned skeleton
+    proc/body/confidence      (T',24)   per-joint confidence 0..1
+    proc/contact              (T',2)    left / right foot contact
+    proc/valid                (T',)     False inside tracking dropouts longer than max_gap_s
+    proc/{headset,controller/left,controller/right}/{pos,quat}  aligned sensor poses
+      group attrs proc: fps, profile, calibration(json), report(json), observed_axes(json)
+    labels/{loco,lower,upper} (T',)     int16 label index per frame, stage 2
+      group attrs labels: {axis}_names(json), segments(json: start,end,t_start,t_end,loco,lower,upper,
+                          name,confidence,needs_review), reviewed (set by --import-review)
+    retarget/igris_c/qpos     (T',38)   root xyz + root wxyz + 31 joints (MJCF order), stage 3
+      group attrs retarget/igris_c: fps, joint_names(json), qpos_layout, diagnostics(json)
 
 Every stage only *adds* groups, so an episode can be re-processed from any stage.
 """

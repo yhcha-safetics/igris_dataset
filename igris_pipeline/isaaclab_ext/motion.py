@@ -16,8 +16,29 @@ import glob
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def project_relative(paths: Sequence[str]) -> list[str]:
+    """Paths inside the project as project-relative strings, so run outputs (policy.json, ...) stay
+    valid when the project folder is moved or copied to another PC; other paths stay absolute."""
+    out = []
+    for p in paths:
+        try:
+            rel = os.path.relpath(os.path.abspath(p), PROJECT_ROOT)
+        except ValueError:  # different drive
+            rel = ".."
+        out.append(os.path.abspath(p) if rel.startswith("..") else rel)
+    return out
+
+
+def from_project(paths: Sequence[str]) -> list[str]:
+    """Inverse of project_relative()."""
+    return [p if os.path.isabs(p) else str(PROJECT_ROOT / p) for p in paths]
 
 REQUIRED_KEYS = (
     "fps",

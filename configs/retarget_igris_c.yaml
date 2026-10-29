@@ -116,4 +116,6 @@ postprocess:
   ground: contact       # contact | raise_only | none  -- sole on the floor during human foot contact
   smooth_hz: 8.0        # zero-phase low-pass on joint angles / root
   joint_margin: 0.02    # rad, clip to (range - margin); ranges = MJCF ∩ Isaac URDF (robot.py)
+  isaac_soft_limits: true  # also clip to Isaac's soft limits (mid +- 0.5*range*0.9): straight knees / elbows
+                           # otherwise sit outside them and the tracking policy is penalised every step
   max_speed_ratio: 0.8  # rate-limit joints to 80% of the actuator speed (configs/igris_c_actuators.yaml)

@@ -104,6 +104,11 @@ def resample_series(t, x, valid, t_new, max_gap, is_quat=False):
             x_new[..., 0] = 1.0
         return x_new, np.zeros(len(t_new), bool), np.zeros(len(t_new), bool)
     tv, xv = t[valid], x[valid]
+    if np.any(np.diff(tv) <= 0):  # clock jump / duplicate stamps: keep the first sample per time, in order
+        tv, first = np.unique(tv, return_index=True)
+        xv = xv[first]
+        if len(tv) < 2:
+            return resample_series(t[:0], x[:0], valid[:0], t_new, max_gap, is_quat)
     if is_quat:
         xv = quat_continuity(xv, axis=0)
     idx = np.clip(np.searchsorted(tv, t_new, side="right"), 1, len(tv) - 1)

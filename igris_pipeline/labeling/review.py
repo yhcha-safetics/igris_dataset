@@ -13,7 +13,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .auto_label import AXES, LearnedLabeler, axis_label_names, read_labels
+from .auto_label import AXES, AxisResult, LearnedLabeler, axis_label_names, composite_segments, read_labels
 from .features import compute_features, feature_matrix
 
 
@@ -77,24 +77,42 @@ def export_review_csv(ep, path):
     return Path(path)
 
 
+def _read_csv_rows(path) -> list[dict]:
+    """Rows of a review CSV saved as UTF-8 (our export) or as cp949 (Korean Excel's plain "CSV")."""
+    for enc in ("utf-8-sig", "cp949"):
+        try:
+            with open(path, encoding=enc, newline="") as f:
+                return list(csv.DictReader(f))
+        except UnicodeDecodeError:
+            continue
+    raise UnicodeDecodeError("review csv", b"", 0, 1, f"{path}: neither UTF-8 nor cp949")
+
+
 def import_review_csv(ep, path, rules: dict):
-    """Apply a corrected CSV (time based) to the episode's frame labels."""
+    """Apply a corrected CSV (time based) to the episode's frame labels and rebuild the segments."""
     fps = float(ep.group_attrs.get("proc", {}).get("fps", ep.fps))
     T = ep["labels/loco"].shape[0]
-    names = {a: axis_label_names(rules["axes"][a]) for a in AXES}
+    ga = ep.group_attrs["labels"]
+    # frame labels index the names stored with them (write_labels), not necessarily the current rules
+    names = {a: json.loads(ga[f"{a}_names"]) if f"{a}_names" in ga else axis_label_names(rules["axes"][a])
+             for a in AXES}
     frame = {a: ep[f"labels/{a}"].copy() for a in AXES}
-    with open(path, encoding="utf-8-sig") as f:
-        for row in csv.DictReader(f):
-            s, e = int(round(float(row["t_start"]) * fps)), int(round(float(row["t_end"]) * fps))
-            for a in AXES:
-                lab = row[a].strip()
-                if lab not in names[a]:  # new label introduced by the reviewer
-                    names[a].append(lab)
-                frame[a][max(0, s):min(T, e)] = names[a].index(lab)
+    for row in _read_csv_rows(path):
+        s, e = int(round(float(row["t_start"]) * fps)), int(round(float(row["t_end"]) * fps))
+        for a in AXES:
+            lab = row[a].strip()
+            if lab not in names[a]:  # new label introduced by the reviewer
+                names[a].append(lab)
+            frame[a][max(0, s):min(T, e)] = names[a].index(lab)
+    results = {}
     for a in AXES:
         ep[f"labels/{a}"] = frame[a].astype(np.int16)
-        ep.group_attrs["labels"][f"{a}_names"] = json.dumps(names[a])
-    ep.group_attrs["labels"]["reviewed"] = 1
+        ga[f"{a}_names"] = json.dumps(names[a])
+        results[a] = AxisResult(names[a], frame[a].astype(np.int64), np.eye(len(names[a]))[frame[a]])
+    # segments drive the exports and the per-segment evaluation: rebuild them from the reviewed
+    # frames (confidence 1, nothing left to review)
+    ga["segments"] = json.dumps(composite_segments(results, fps, review_thr=0.0), ensure_ascii=False)
+    ga["reviewed"] = 1
     return ep
 
 
@@ -107,9 +125,11 @@ def train_learned(episodes: list, synthetic_clips: list | None = None, out_path=
     """episodes: Episode objects with reviewed labels; synthetic_clips: SyntheticClip objects."""
     Xs, Ys = [], {a: [] for a in AXES}
     for ep in episodes:
-        fps = float(ep.group_attrs.get("proc", {}).get("fps", ep.fps))
+        proc = ep.group_attrs.get("proc", {})
+        fps = float(proc.get("fps", ep.fps))
+        stature = json.loads(proc["calibration"]).get("stature") if "calibration" in proc else None
         pos, _ = ep.body("proc")
-        X, lab = training_rows(pos, fps, read_labels(ep))
+        X, lab = training_rows(pos, fps, read_labels(ep), stature=stature)  # same normalisation as stage_label
         Xs.append(X)
         for a in AXES:
             Ys[a] += list(lab[a])
@@ -118,6 +138,8 @@ def train_learned(episodes: list, synthetic_clips: list | None = None, out_path=
         Xs.append(X)
         for a in AXES:
             Ys[a] += list(lab[a])
+    if not Xs:
+        raise ValueError("no training data: no reviewed episodes (import a review CSV first) and no synthetic clips")
     model = LearnedLabeler().fit(np.concatenate(Xs), Ys)
     if out_path:
         model.save(out_path)

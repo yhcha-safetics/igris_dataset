@@ -112,7 +112,7 @@ IGRIS_C_CFG = ArticulationCfg(
         joint_vel={".*": 0.0},
     ),
     actuators=_actuators(*C.ACTUATOR_DELAY_STEPS),
-    soft_joint_pos_limit_factor=0.9,
+    soft_joint_pos_limit_factor=C.SOFT_JOINT_POS_LIMIT_FACTOR,
 )
 """IGRIS-C (23 DoF) with Robros DelayedPD actuators (0-2 step delay)."""
 

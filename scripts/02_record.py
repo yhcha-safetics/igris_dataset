@@ -24,8 +24,13 @@ ap.add_argument("--seconds", type=float, default=None)
 ap.add_argument("--hands", action="store_true", help="also record 26-joint hand tracking")
 ap.add_argument("--simulate", default=None, help="simulate a profile instead of the live stream")
 ap.add_argument("--seed", type=int, default=0)
+ap.add_argument("--usb", action="store_true", help="adb reverse tcp:63901 (enter 127.0.0.1 as PC IP in the headset app)")
 a = ap.parse_args()
 
+if a.usb:
+    from igris_pipeline.pico.device_probe import usb_tunnel
+
+    print("[usb] adb reverse tcp:63901:", "ok" if usb_tunnel() else "FAILED (headset connected, USB debugging allowed?)")
 if a.simulate:
     from igris_pipeline.pico.simulate import SimulatedXRTSource
 

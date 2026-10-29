@@ -32,8 +32,16 @@ def _rolling_rms(x, n):
     return np.sqrt(np.clip(uniform_filter1d(x ** 2, size=max(1, n), axis=0, mode="nearest"), 0, None))
 
 
+HEAD_TOP = 0.12  # m from the head joint to the top of the head (correction.py adds it to get stature)
+
+
 def compute_features(pos: np.ndarray, fps: float, stature: float | None = None) -> dict[str, np.ndarray]:
-    """pos: (T,24,3) world Z-up. Returns dict of (T,) feature arrays."""
+    """pos: (T,24,3) world Z-up. Returns dict of (T,) feature arrays.
+
+    Lengths are normalised by the standing head-joint height. Without `stature` it is the 95th
+    percentile of the head height (what the rule thresholds were tuned on); a calibrated
+    stature (top of head, stage 1-2) is converted to the same reference.
+    """
     p = np.asarray(pos, dtype=np.float64)
     T = p.shape[0]
     up = np.array([0.0, 0.0, 1.0])
@@ -44,6 +52,8 @@ def compute_features(pos: np.ndarray, fps: float, stature: float | None = None) 
     head_h = p[:, J["head"], 2] - floor
     if stature is None:
         stature = float(np.percentile(head_h, 95))
+    else:
+        stature = float(stature) - HEAD_TOP
     stature = max(stature, 0.5)
 
     # heading frame from hips + shoulders

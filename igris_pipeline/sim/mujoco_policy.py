@@ -58,7 +58,8 @@ from igris_pipeline.isaaclab_ext.metrics import (  # noqa: E402  (pure numpy)
     step_metrics,
     write_json,
 )
-from igris_pipeline.isaaclab_ext.motion import load_clip, load_segments, resample_clip, resolve_motion_files  # noqa: E402
+from igris_pipeline.isaaclab_ext.motion import (  # noqa: E402
+    from_project, load_clip, load_segments, resample_clip, resolve_motion_files)
 
 GRAVITY_DIR = np.array([0.0, 0.0, -1.0])
 
@@ -461,14 +462,16 @@ class MujocoPolicyRunner:
             ref_k = self.reference_frame(self.k)
             self.step(action)
             rob = self.robot_state()
-            mets = step_metrics({k: v[None] for k, v in ref_k.items()}, {k: v[None] for k, v in rob.items()})
-            mets_n = {k: np.repeat(v, n) for k, v in mets.items()}
-            acc.add(mets_n, mask, frames=np.full(n, self.k))
             if trajectory is not None:
                 trajectory.setdefault("obs", []).append(obs)
                 trajectory.setdefault("action", []).append(action)
                 trajectory.setdefault("qpos", []).append(self.data.qpos.copy())
             reasons = self.check_terminations(ref_k, rob)
+            if not reasons:
+                # like play_eval.py: Isaac resets inside env.step, so the terminating step is never scored
+                # there; scoring it here made MuJoCo completion 1/T higher and averaged in the fall frame
+                mets = step_metrics({k: v[None] for k, v in ref_k.items()}, {k: v[None] for k, v in rob.items()})
+                acc.add({k: np.repeat(v, n) for k, v in mets.items()}, mask, frames=np.full(n, self.k))
             if reasons:
                 r = [""] * n
                 r[env_index] = "+".join(reasons)
@@ -543,7 +546,7 @@ def main(argv=None):
         joint_dynamics=args.joint_dynamics, passive_kp=args.passive_kp, passive_kd=args.passive_kd,
         zero_action=args.zero_action,
     )
-    motions = args.motion or runner.meta["training_motion_files"]
+    motions = args.motion or from_project(runner.meta["training_motion_files"])
     res = runner.evaluate(motions, max_steps=args.max_steps, render=args.render, record_trajectory=bool(args.save_trajectory))
     trajs = res.pop("_trajectories", None)
     if trajs is not None:
