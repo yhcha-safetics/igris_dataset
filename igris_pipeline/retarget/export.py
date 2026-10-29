@@ -3,6 +3,10 @@
 * tracking NPZ  (Isaac Lab tracking task in igris_pipeline/isaaclab_ext, BeyondMimic-style keys)
 * GMR canonical PKL for IGRIS-C (Robros GMR fork, IGRIS_C_CANONICAL_FORM.md)
 * CSV rows [root xyz, root quat xyzw, 31 joints] (BeyondMimic / mjlab csv_to_npz input)
+
+NPZ and PKL can carry extra per-frame `series` (resampled with the motion, e.g. the hand command
+hand_cmd (T, 12) of igris_pipeline/hands.py: the canonical form has no finger joints) and `static`
+arrays (their names / layout); consumers that do not know them ignore them.
 """
 from __future__ import annotations
 
@@ -48,6 +52,18 @@ def resample_qpos(qpos: np.ndarray, fps_in: float, fps_out: float) -> np.ndarray
     return out
 
 
+def resample_array(x: np.ndarray, fps_in: float, fps_out: float) -> np.ndarray:
+    """Linear resampling of a (T, ...) series on the time grid of resample_qpos."""
+    x = np.asarray(x, float)
+    if abs(fps_in - fps_out) < 1e-6:
+        return x.copy()
+    t_in = np.arange(len(x)) / fps_in
+    t_out = np.arange(0.0, t_in[-1] + 1e-9, 1.0 / fps_out)
+    flat = x.reshape(len(x), -1)
+    out = np.stack([np.interp(t_out, t_in, flat[:, k]) for k in range(flat.shape[1])], axis=-1)
+    return out.reshape((len(t_out),) + x.shape[1:])
+
+
 def _diff(x, dt):
     v = np.zeros_like(x)
     if len(x) < 2:
@@ -66,20 +82,24 @@ def body_states(robot: IgrisModel, qpos: np.ndarray, fps: float, bodies: list[st
     return bodies, P, Q, _diff(P, dt), angular_velocity(Q, dt)
 
 
-def to_tracking_npz(path, robot: IgrisModel, qpos: np.ndarray, fps: float, fps_out: float = 50.0, meta: dict | None = None):
+def to_tracking_npz(path, robot: IgrisModel, qpos: np.ndarray, fps: float, fps_out: float = 50.0, meta: dict | None = None,
+                    series: dict | None = None, static: dict | None = None):
     q = resample_qpos(qpos, fps, fps_out)
     bodies, P, Q, V, W = body_states(robot, q, fps_out)
     jp = q[:, 7:]
+    extra = {k: resample_array(v, fps, fps_out)[:len(q)].astype(np.float32) for k, v in (series or {}).items()}
+    extra.update(static or {})
     np.savez_compressed(
         path, fps=np.float64(fps_out), joint_names=np.array(robot.joint_names), joint_pos=jp.astype(np.float32),
         joint_vel=_diff(jp, 1.0 / fps_out).astype(np.float32), body_names=np.array(bodies),
         body_pos_w=P.astype(np.float32), body_quat_w=Q.astype(np.float32), body_lin_vel_w=V.astype(np.float32),
         body_ang_vel_w=W.astype(np.float32), root_pos=q[:, :3].astype(np.float32), root_quat=q[:, 3:7].astype(np.float32),
-        meta=np.array(json.dumps(meta or {}, ensure_ascii=False)))
+        meta=np.array(json.dumps(meta or {}, ensure_ascii=False)), **extra)
     return Path(path)
 
 
-def to_canonical_pkl(path, robot: IgrisModel, qpos: np.ndarray, fps: float, meta: dict | None = None):
+def to_canonical_pkl(path, robot: IgrisModel, qpos: np.ndarray, fps: float, meta: dict | None = None,
+                     series: dict | None = None, static: dict | None = None):
     """IGRIS-C canonical GMR PKL (float32, wxyz), see Robros IGRIS_C_CANONICAL_FORM.md."""
     dt = 1.0 / fps
     root_pos = qpos[:, :3]
@@ -104,6 +124,8 @@ def to_canonical_pkl(path, robot: IgrisModel, qpos: np.ndarray, fps: float, meta
         "keybody_rot_local": f32(ql), "keybody_pos": f32(P), "link_body_list": list(CANONICAL_KEYBODIES),
         "local_body_link_body_list": None, "local_body_pos": None, "retarget_meta": dict(meta or {}),
     }
+    d.update({k: f32(v) for k, v in (series or {}).items()})  # extensions of the canonical form (e.g. hand_cmd)
+    d.update({k: np.asarray(v).tolist() for k, v in (static or {}).items()})
     with open(path, "wb") as f:
         pickle.dump(d, f)
     return Path(path)

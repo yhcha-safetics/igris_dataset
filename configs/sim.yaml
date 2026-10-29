@@ -14,6 +14,10 @@ physics:
   noslip_iterations: 0
   harness: {kp: 3000.0, kd: 300.0, gain_scale: 4.0}
 
+hands:                      # robot fingers follow the analog controller grips (igris_pipeline/hands.py)
+  enabled: true             # articulated finger overlays on the hands (visual; holding objects = grasp below)
+  grip_full_command: 0.6    # normalized hand command at a fully squeezed grip (Robros' default)
+
 grasp:
   radius: 0.10              # m between the palm collider and the object surface
   grip_on: 0.6              # controller grip value that starts a grasp

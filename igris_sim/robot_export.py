@@ -44,12 +44,28 @@ def _r(a, n=6):
 
 
 def robot_description(world) -> tuple[dict, dict[str, bytes]]:
-    """(robot.json content, {relative path: file bytes}) for the robot of a SimWorld."""
+    """(robot.json content, {relative path: file bytes}) for the robot of a SimWorld.
+
+    With hand overlays (igris_sim/hand_model.py) their bodies are published as children of the
+    robot hands (the overlay root sits exactly on the hand) and their joints read
+    qpos[world.nq_r + k] for the k-th of world.joint_names_ext()[31:], i.e. the layout of
+    SimWorld.qpos_ext() that state.robot.qpos carries."""
     m = world.model
     bodies = [b for b in range(1, m.nbody) if world._is_robot_body(b)]  # body ids are parents-first
+    overlay = getattr(world, "overlay", None)
+    roots = {}
+    if overlay is not None:
+        roots = {r: world.hand_body[s] for s, r in overlay.root.items()}
+        bodies += [b for b in range(1, m.nbody) if overlay.is_overlay_body(m, b)]
+        ext_names = world.joint_names_ext()
+        ext_qpos = {n: world.nq_r + k for k, n in enumerate(ext_names[len(world.robot.joint_names):])}
     index = {b: k for k, b in enumerate(bodies)}
     out_bodies = []
     for b in bodies:
+        if b in roots:  # overlay root: rigidly on the hand (its mocap pose is the hand pose)
+            out_bodies.append({"name": mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, b), "parent": index[roots[b]],
+                               "pos": [0.0, 0.0, 0.0], "quat": [1.0, 0.0, 0.0, 0.0], "joint": None})
+            continue
         if m.body_jntnum[b] > 1:
             raise ValueError(f"body {mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, b)}: more than one joint")
         joint = None
@@ -59,7 +75,9 @@ def robot_description(world) -> tuple[dict, dict[str, bytes]]:
                 joint = {"type": "free"}
             elif m.jnt_type[j] == mujoco.mjtJoint.mjJNT_HINGE:
                 a = int(m.jnt_qposadr[j])
-                joint = {"type": "hinge", "qpos": a, "axis": _r(m.jnt_axis[j]), "pos": _r(m.jnt_pos[j]),
+                name = mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_JOINT, j)
+                qa = ext_qpos[name] if overlay is not None and overlay.is_overlay_body(m, b) else a
+                joint = {"type": "hinge", "qpos": qa, "axis": _r(m.jnt_axis[j]), "pos": _r(m.jnt_pos[j]),
                          "ref": float(m.qpos0[a])}
             else:
                 raise ValueError(f"joint {mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_JOINT, j)}: unsupported type")
@@ -85,8 +103,9 @@ def robot_description(world) -> tuple[dict, dict[str, bytes]]:
         else:
             continue
         geoms.append(e)
-    desc = {"format": FORMAT, "version": VERSION, "nq": int(world.nq_r),
-            "joint_names": list(world.robot.joint_names), "bodies": out_bodies, "geoms": geoms}
+    names = world.joint_names_ext() if overlay is not None else list(world.robot.joint_names)
+    desc = {"format": FORMAT, "version": VERSION, "nq": 7 + len(names),
+            "joint_names": names, "bodies": out_bodies, "geoms": geoms}
     files["robot.json"] = json.dumps(desc, separators=(",", ":")).encode("utf-8")
     return desc, files
 

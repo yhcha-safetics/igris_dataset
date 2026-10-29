@@ -296,6 +296,8 @@ PICO 바디 트래킹은 **보정된 트래커가 최소 2개** 있어야 동작
   - `motions/ep_XXXX.npz`: Isaac Lab 트래킹용. 50 fps, joint/body pos·quat(wxyz)·vel. meta의 라벨 세그먼트는 파일의 fps 기준 프레임입니다.
   - `.pkl`: Robros IGRIS-C canonical GMR 형식.
   - `.csv`: BeyondMimic/mjlab 형식(헤더 없음, MJCF 31관절 순서).
+  - 손 채널(`.npz`, `.pkl`): 녹화의 컨트롤러 그립(`raw/buttons/*_grip`)에서 만든 `hand_cmd`(T,12, Robros 정규화 손 명령),
+    `hand_joint_pos`(T,22, 손가락 각도), `hand_grip`(T,2)과 레이아웃(`hand_motor_ids`, `hand_joint_names`).
   - 트래킹 결손(`proc/valid`=False)이 있으면 유효 구간별로 `ep_XXXX_p0`, `_p1`… 로 나눠 내보냅니다(2 s 미만 구간은 버림).
     결손이 없으면 지금처럼 `ep_XXXX` 하나입니다. 어떤 구간이 나갔는지는 `reports/*_retarget.json`의 `motion_parts`에 있습니다.
 - **Isaac soft 한계 안의 레퍼런스**: Isaac은 `soft_joint_pos_limit_factor=0.9`(URDF 범위 중앙 ±45%) 밖을 매 스텝 감점하고 리셋 때 잘라냅니다.
@@ -409,9 +411,15 @@ PICO (XRoboToolkit 또는 PICO 앱) ─UDP─> 스트리밍 보정 ─> 스트�
   - `kinematic`: 로봇이 사람을 그대로 따라가고 물체만 시뮬레이션합니다. 벽은 통과합니다.
   - `harness`: 관절 PD와 가상 하네스로 로봇도 물리 시뮬레이션합니다.
 - **상호작용**: 그립을 누르면 손바닥 10 cm 안의 물체를 잡습니다. 놓으면 그때의 속도로 떨어지거나 날아갑니다.
+- **손가락(그립 동작)**: 컨트롤러 그립(아날로그)을 쥔 만큼 로봇 손가락이 오므라듭니다(MuJoCo 뷰어와 PICO 앱 모두).
+  손 명령은 Robros 손 형식(정규화 12개, 모터 11–16/21–26, 그립 × 0.6, `igris_pipeline/hands.py`)이라 실제 IGRIS-C 손 제어에 그대로 쓸 수 있습니다.
+  손가락 모델은 원래 손 메시 크기에 맞춘 간략 모델이며(`igris_sim/hand_model.py`), 관절 이름은 Robros와 같습니다.
+  `configs/sim.yaml`의 `hands`에서 끄거나 그립 최대 명령을 바꿉니다.
 - **이동**: 왼쪽 스틱으로 이동, 오른쪽 스틱으로 회전합니다. 실제로 걸은 동작에 더해집니다.
 - **녹화**: A로 시작·정지합니다. `raw/*`는 `02_record.py`와 같은 형식이라 `run_pipeline.py`로 다시 처리할 수 있습니다.
-  `sim/*`에는 로봇 상태, 물체 포즈, 잡기 상태, 이동 오프셋이 담깁니다.
+  `sim/*`에는 로봇 상태, 물체 포즈, 잡기 상태, 이동 오프셋, 손 명령(`sim/hand/cmd`)과 손가락 각도가 담깁니다.
+  `run_pipeline.py`로 다시 처리하면 `motions/*.npz|pkl`에 `hand_cmd`(T,12), `hand_joint_pos`(T,22), `hand_grip`(T,2)이
+  모션과 같은 시간축으로 들어갑니다(Isaac 로더는 이 키를 무시).
 - **가상 환경**: `scenes/<name>/scene.json`(Unity와 같은 파일). 기본 맵은 세 가지입니다.
   - `empty`: 빈 바닥, 거리 표시, 공
   - `tabletop`: 책상, 집을 물건 4개, 쟁반, 바닥의 통

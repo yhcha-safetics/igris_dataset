@@ -33,7 +33,8 @@ def world():
 
 
 def _random_qpos(w, rng):
-    q = w.robot_qpos()
+    """Random qpos in the app layout (SimWorld.qpos_ext: robot, then finger angles if hands are on)."""
+    q = w.qpos_ext()
     q[:3] += rng.uniform(-0.5, 0.5, 3)
     q[3:7] = rng.normal(size=4)
     q[3:7] /= np.linalg.norm(q[3:7])
@@ -43,8 +44,11 @@ def _random_qpos(w, rng):
 
 def _mj_poses(w, q):
     m, d = w.model, w.data
-    d.qpos[:w.nq_r] = q
+    d.qpos[:w.nq_r] = q[:w.nq_r]
     mujoco.mj_kinematics(m, d)
+    if w.overlay is not None:  # finger overlays on the hands, angles from the tail of q
+        w.overlay.apply(d, np.asarray(q[w.nq_r:]))
+        mujoco.mj_kinematics(m, d)
     return d
 
 
@@ -57,7 +61,9 @@ def _geom_quat(d, g):
 def test_robot_description_matches_mujoco(world):
     desc, files = robot_description(world)
     m = world.model
-    assert desc["nq"] == world.nq_r == 38 and len(desc["joint_names"]) == 31
+    n_hand = 22 if world.overlay is not None else 0
+    assert world.nq_r == 38 and desc["nq"] == 38 + n_hand and len(desc["joint_names"]) == 31 + n_hand
+    assert desc["joint_names"] == world.joint_names_ext()
     assert all(b["parent"] < k for k, b in enumerate(desc["bodies"]))
     rng = np.random.default_rng(1)
     for _ in range(3):
@@ -68,7 +74,7 @@ def test_robot_description_matches_mujoco(world):
         assert np.abs(xp - d.xpos[ids]).max() < 1e-9
         assert np.abs(np.abs(np.sum(xq * d.xquat[ids], 1)) - 1).max() < 1e-9
     # every visual mesh is exported in its compiled (geom) frame
-    for g in desc["geoms"]:
+    for g in (g for g in desc["geoms"] if g["type"] == "mesh"):
         k = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_MESH, Path(g["mesh"]).stem)
         text = files[g["mesh"]].decode()
         assert text.count("\nv ") == m.mesh_vertnum[k] and text.count("\nf ") == m.mesh_facenum[k]
@@ -103,15 +109,26 @@ def test_scene_message_points_to_robot():
 
 # -- the app's C# core ------------------------------------------------------------------------
 def _find_csc():
+    """Command prefix of a C# compiler: $CSC, Visual Studio's Roslyn, csc on PATH, or the Roslyn that
+    ships with a Unity editor (run by Unity's dotnet, compiling against the .NET Framework 4 assemblies)."""
     if os.environ.get("CSC"):
-        return os.environ["CSC"]
+        return [os.environ["CSC"]]
     pats = [r"C:\Program Files*\Microsoft Visual Studio\*\*\MSBuild\Current\Bin\Roslyn\csc.exe",
             r"C:\Program Files*\Microsoft Visual Studio\*\*\MSBuild\*\Bin\Roslyn\csc.exe"]
     for p in pats:
         hits = sorted(glob.glob(p))
         if hits:
-            return hits[-1]
-    return shutil.which("csc")
+            return [hits[-1]]
+    if shutil.which("csc"):
+        return [shutil.which("csc")]
+    fw = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Microsoft.NET" / "Framework64" / "v4.0.30319"
+    for data in sorted(glob.glob(str(Path.home() / "Unity" / "Hub" / "Editor" / "*" / "Editor" / "Data"))
+                       + sorted(glob.glob(r"C:\Program Files\Unity\Hub\Editor\*\Editor\Data"))):
+        dotnet, csc = Path(data) / "NetCoreRuntime" / "dotnet.exe", Path(data) / "DotNetSdkRoslyn" / "csc.dll"
+        if dotnet.is_file() and csc.is_file() and (fw / "mscorlib.dll").is_file():
+            return [str(dotnet), str(csc), "-noconfig", "-nostdlib",
+                    *(f"-r:{fw / a}" for a in ("mscorlib.dll", "System.dll", "System.Core.dll"))]
+    return None
 
 
 def _unity_scale(shape, size):
@@ -143,7 +160,7 @@ def _fixtures(tmp_path, world):
         fk.append({"qpos": q.tolist(), "body_pos": d.xpos[ids].tolist(), "body_quat": d.xquat[ids].tolist(),
                    "geom_pos": d.geom_xpos[gids].tolist(), "geom_quat": [_geom_quat(d, g).tolist() for g in gids]})
     mesh_counts = {}
-    for g in desc["geoms"]:
+    for g in (g for g in desc["geoms"] if g["type"] == "mesh"):
         k = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_MESH, Path(g["mesh"]).stem)
         mesh_counts[g["mesh"]] = [int(m.mesh_vertnum[k]), int(m.mesh_facenum[k])]
     conv_mj = []
@@ -195,7 +212,7 @@ def test_app_core_csharp(tmp_path, world):
     sources.append(str(APP / "Assets" / "IgrisPico" / "Runtime" / "SimLink.cs"))  # Unity-free as well
     exe = tmp_path / "CoreTests.exe"
     # C# 7.3: the core must also compile in Unity without newer language features
-    r = subprocess.run([csc, "-nologo", "-langversion:7.3", "-warnaserror+", f"-out:{exe}",
+    r = subprocess.run([*csc, "-nologo", "-langversion:7.3", "-warnaserror+", f"-out:{exe}",
                         str(APP / "CoreTests" / "CoreTests.cs"), *sources], capture_output=True, text=True)
     assert r.returncode == 0, r.stdout + r.stderr
     fx_path, unity = _fixtures(tmp_path, world)

@@ -101,6 +101,7 @@ def stage_retarget(ep_path, retarget_cfg=None, export_fps=50.0, min_part_s=2.0) 
         old.unlink()  # a re-run may split differently; stale parts would be picked up by folder/glob loaders
     segs = json.loads(ep.group_attrs.get("labels", {}).get("segments", "[]"))
     valid = ep["proc/valid"].astype(bool) if "proc/valid" in ep else np.ones(len(res.qpos), bool)
+    hand, hand_static = hand_series(ep)
     parts = motion_parts(valid, fps, min_part_s)
     exported = []
     for k, (a, b) in enumerate(parts):
@@ -108,10 +109,12 @@ def stage_retarget(ep_path, retarget_cfg=None, export_fps=50.0, min_part_s=2.0) 
         q = res.qpos[a:b]
         meta = {"episode": str(ep_path), "profile": proc.get("profile"), "source_fps": fps,
                 "source_frames": [int(a), int(b)], "retarget": res.diagnostics.get("scaling")}
+        series = {key: v[a:b] for key, v in hand.items()} if hand else None
         # segment indices at the source fps, re-based to the part (load_segments rescales via source_fps)
         X.to_tracking_npz(md / f"{name}.npz", r.robot, q, fps, export_fps,
-                          meta={**meta, "segments": _segments_in(segs, a, b, fps)})
-        X.to_canonical_pkl(md / f"{name}.pkl", r.robot, q, fps, meta={**meta, "segments": _segments_in(segs, a, b, fps)})
+                          meta={**meta, "segments": _segments_in(segs, a, b, fps)}, series=series, static=hand_static)
+        X.to_canonical_pkl(md / f"{name}.pkl", r.robot, q, fps, meta={**meta, "segments": _segments_in(segs, a, b, fps)},
+                           series=series, static=hand_static)
         X.to_csv(md / f"{name}.csv", X.resample_qpos(q, fps, 30.0))
         exported.append({"name": name, "t_start": round(a / fps, 2), "t_end": round(b / fps, 2)})
     res.diagnostics["motion_parts"] = exported
@@ -119,6 +122,24 @@ def stage_retarget(ep_path, retarget_cfg=None, export_fps=50.0, min_part_s=2.0) 
     (_reports_dir(ep_path) / f"{ep_path.stem}_retarget.json").write_text(
         json.dumps(res.diagnostics, ensure_ascii=False, indent=1), encoding="utf-8")
     return res.diagnostics
+
+
+def hand_series(ep) -> tuple[dict, dict | None]:
+    """Per-frame hand channels for the exports from the controller grips (proc/hand/grip):
+    hand_cmd (T, 12) Robros-normalized motor command, hand_joint_pos (T, 22), hand_grip (T, 2);
+    plus their layout arrays. Empty when the episode has no grips."""
+    from .hands import (GRIP_FULL_COMMAND, HAND_JOINT_NAMES, MOTOR_IDS, MOTOR_SLOT_LABELS, command_to_joint_pos,
+                        grip_to_command)
+
+    if "proc/hand/grip" not in ep:
+        return {}, None
+    g = np.asarray(ep["proc/hand/grip"], float)
+    # a simulator session records the full-grip command it used; otherwise Robros' default
+    full = float(ep.group_attrs.get("sim", {}).get("hand_grip_full_command", GRIP_FULL_COMMAND))
+    cmd = grip_to_command(g[:, 0], g[:, 1], full)
+    static = {"hand_motor_ids": np.array(MOTOR_IDS), "hand_motor_labels": np.array(MOTOR_SLOT_LABELS),
+              "hand_joint_names": np.array(HAND_JOINT_NAMES)}
+    return {"hand_cmd": cmd, "hand_joint_pos": command_to_joint_pos(cmd), "hand_grip": g}, static
 
 
 def motion_parts(valid: np.ndarray, fps: float, min_part_s: float = 2.0) -> list[tuple[int, int]]:

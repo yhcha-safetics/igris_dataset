@@ -255,7 +255,8 @@ def test_udp_session_roundtrip(cfg):
             last = m if m["type"] == "state" else last
         assert "scene" in replies and last is not None
         assert last["status"] == "running" and last["profile"] == "body_2trk"
-        assert len(last["robot"]["qpos"]) == 38 and len(last["objects"]["pos"]) == 1
+        # robot qpos (38) + the finger overlay joints (22), as listed by the scene message's joint_names
+        assert len(last["robot"]["qpos"]) == 7 + len(s.world.joint_names_ext()) == 60 and len(last["objects"]["pos"]) == 1
     finally:
         client.close()
         hub.close()
@@ -293,6 +294,49 @@ def test_recording_is_pipeline_compatible(cfg, tmp_path):
     assert ep["sim/objects/pos"].shape[1] == len(s.world.dynamic)
     assert json.loads(ep.group_attrs["sim"]["scene_json"])["name"] == "tabletop"
     stage_correct(s.saved[0])  # the offline pipeline accepts it
+
+
+def test_grips_close_the_fingers_and_are_recorded(cfg, tmp_path):
+    from igris_pipeline.hands import MOTOR_IDS, grip_to_command
+    from igris_pipeline.pipeline import hand_series, stage_correct
+
+    s = SimSession(cfg, "tabletop", record_dir=tmp_path / "raw")
+    frames, _ = sim_frames("body_2trk")
+    t = frame_times(frames)
+    _run(s, [f for f, tt in zip(frames, t) if tt < 3.6])
+    assert s.status == "running"
+    rest = [f for f, tt in zip(frames, t) if tt >= 3.6]
+    ramp = np.linspace(0.0, 1.0, len(rest))  # left grip squeezed over the take, right released
+    for f, g in zip(rest, ramp):
+        f.buttons = {**f.buttons, "left_grip": float(g), "right_grip": 0.0}
+    s.set_recording(True, now=3.6)
+    _run(s, rest, offset=3.6)
+    w = s.world
+    g = s.latest.buttons["left_grip"]  # the newest frame is the one the last tick used
+    assert g > 0.95 and np.allclose(w.hand_cmd, grip_to_command(g, 0.0, s.grip_full))
+    # the overlay finger joints carry the command and sit on the hand
+    li = w.overlay.qposadr[3]  # l_3_joint_index_middle
+    assert abs(w.data.qpos[li] - s.grip_full * g * np.pi / 2) < 1e-9 and np.all(w.data.qpos[w.overlay.qposadr[11:]] == 0)
+    root = w.overlay.root["left"]
+    assert np.allclose(w.data.xpos[root], w.data.xpos[w.hand_body["left"]])
+    st = s.state_message()
+    assert len(st["robot"]["qpos"]) == 7 + len(s.scene_message()["joint_names"]) == 60
+    assert st["hand_cmd"][6:] == [round(s.grip_full * g, 3)] * 6 and st["hand_cmd"][:6] == [0.0] * 6
+    s.set_recording(False)
+    ep = Episode.load(s.saved[0])
+    cmd = ep["sim/hand/cmd"]
+    assert cmd.shape[1] == 12 and cmd[-1, 6] > 0.5 and cmd[0, 6] < 0.1 and np.all(cmd[:, :6] == 0)
+    assert ep["sim/hand/joint_pos"].shape[1] == 22 and json.loads(ep.group_attrs["sim"]["hand_motor_ids"]) == list(MOTOR_IDS)
+    # offline: the grips in raw/buttons become the hand channel of the motion exports
+    stage_correct(s.saved[0])
+    series, static = hand_series(Episode.load(s.saved[0]))
+    assert series["hand_cmd"].shape[1] == 12 and series["hand_cmd"][-5:, 6].mean() > 0.5
+    assert list(static["hand_motor_ids"]) == list(MOTOR_IDS)
+
+
+def test_hands_can_be_disabled(cfg):
+    w = SimWorld(load_scene("empty"), {**cfg, "hands": {"enabled": False}})
+    assert w.overlay is None and len(w.qpos_ext()) == 38 and len(w.joint_names_ext()) == 31
 
 
 def test_locomotion_moves_and_turns_about_the_robot(cfg):

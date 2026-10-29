@@ -10,7 +10,8 @@ Life cycle
 
 Controller mapping (right / left as on the PICO controllers)
   A          start / stop an episode          B          event marker
-  grips      grasp / release with that hand   hold Y     recalibrate
+  grips      close that robot hand (analog, Robros hand command) and grasp / release
+  hold Y     recalibrate
   left stick move (relative to the head)      right stick x  turn about the robot
 
 World frame: MuJoCo / pipeline convention (Z up, +X forward). The calibrated human frame is placed
@@ -27,6 +28,7 @@ from pathlib import Path
 import numpy as np
 import yaml
 
+from igris_pipeline.hands import GRIP_FULL_COMMAND, HAND_JOINT_NAMES, MOTOR_IDS, MOTOR_SLOT_LABELS, grip_to_command
 from igris_pipeline.pico.device_probe import ProbeReport, select_profile
 from igris_pipeline.pico.xrt_source import XRFrame
 from igris_pipeline.retarget.ik_config import load as load_ik_config
@@ -72,6 +74,7 @@ class SimSession:
         self.subject_height = subject_height
         self.body_trackers = body_trackers
         self.subject = subject
+        self.grip_full = float(sim_cfg.get("hands", {}).get("grip_full_command", GRIP_FULL_COMMAND))
         self.world = SimWorld(load_scene(scene), sim_cfg, mode)
         self.retargeter = StreamingRetargeter(self.retarget_cfg, self.fps)
         rc = sim_cfg.get("recording", {})
@@ -188,8 +191,10 @@ class SimSession:
             self._locomotion(fr, dt)
             self.q_target = self.retargeter.step(self.pose, self.loco[2], np.array([self.loco[0], self.loco[1], 0.0]))
             self.timing["retarget_ms"] = self.retargeter.timing_ms
-            for side, action, obj in self.world.update_grasp({s: float(fr.buttons.get(f"{s}_grip", 0.0))
-                                                              for s in ("left", "right")}):
+            grips = {s: float(fr.buttons.get(f"{s}_grip", 0.0)) for s in ("left", "right")}
+            # analog grip -> robot finger closure (Robros hand command), and grasp / release
+            self.world.set_hand_command(grip_to_command(grips["left"], grips["right"], self.grip_full))
+            for side, action, obj in self.world.update_grasp(grips):
                 self._event(action, f"{side}:{obj}")
         t0 = time.perf_counter()
         self.world.step(self.q_target, dt)
@@ -258,7 +263,9 @@ class SimSession:
             meta["subject_height"] = float(self.subject_height)
         sim_attrs = {"scene": self.world.scene.name, "scene_json": self.world.scene.spec, "mode": self.world.mode,
                      "profile": self.profile or "", "calibration": self.calibration or {}, "fps": self.fps,
-                     "objects": self.world.dynamic, "joint_names": list(self.world.robot.joint_names)}
+                     "objects": self.world.dynamic, "joint_names": list(self.world.robot.joint_names),
+                     "hand_motor_ids": list(MOTOR_IDS), "hand_motor_labels": list(MOTOR_SLOT_LABELS),
+                     "hand_joint_names": list(HAND_JOINT_NAMES), "hand_grip_full_command": self.grip_full}
         path = self.recorder.stop(meta, sim_attrs)
         if path is None:
             self._event("record", "discarded (too short)")
@@ -276,7 +283,7 @@ class SimSession:
                 "contact": self.pose.contact.copy(), "obj_pos": pos, "obj_quat": quat,
                 "grasp": np.array([names.index(w.grasped[s]) if w.grasped[s] in names else -1
                                    for s in ("left", "right")]),
-                "loco": self.loco.copy()}
+                "loco": self.loco.copy(), "hand_cmd": w.hand_cmd.copy(), "hand_q": w.hand_q.copy()}
 
     # ---- commands from the app / CLI -------------------------------------------------------
     def command(self, msg: dict) -> dict:
@@ -359,9 +366,10 @@ class SimSession:
             "v": PROTOCOL_VERSION, "type": "state", "t": round(time.time(), 4),
             "status": self.status, "message": self.message, "progress": round(self.progress, 3),
             "profile": self.profile, "mode": w.mode, "scene": w.scene.name,
-            "robot": {"qpos": _r(w.robot_qpos())},
+            "robot": {"qpos": _r(w.qpos_ext())},
             "objects": {"pos": _r(pos), "quat": _r(quat)},
             "grasp": {s: w.grasped[s] for s in ("left", "right")},
+            "hand_cmd": _r(w.hand_cmd, 3),
             "rig": {"pos": _r(rig_p), "quat": _r(rig_q)},
             "head_cam": {"pos": _r(cam_p), "quat": _r(cam_q)},
             "recording": bool(self.recorder is not None and self.recorder.active),
@@ -378,7 +386,7 @@ class SimSession:
         except ValueError:
             folder = None
         return {"v": PROTOCOL_VERSION, "type": "scene", "name": w.scene.name, "folder": folder, "spec": w.scene.spec,
-                "dynamic": w.dynamic, "joint_names": list(w.robot.joint_names),
+                "dynamic": w.dynamic, "joint_names": w.joint_names_ext(),
                 "robot_mjcf": str(Path(w.robot.path).relative_to(ROOT)).replace("\\", "/"),
                 "robot": ROBOT_ASSETS + "robot.json", "assets": asset_base, "rate_hz": self.fps}
 
@@ -392,5 +400,6 @@ def summary_line(s: SimSession) -> str:
     tm = st["timing_ms"]
     return (f"[{st['status']}] profile={st['profile']} mode={st['mode']} scene={st['scene']} frames={st['frames']} "
             f"correct={tm['correct_ms']:.1f}ms ik={tm['retarget_ms']:.1f}ms phys={tm['physics_ms']:.1f}ms "
+            f"hand=L{st['hand_cmd'][6]:.2f}/R{st['hand_cmd'][0]:.2f} "
             f"grasp={json.dumps(st['grasp'])} rec={st['recording']} saved={st['episodes']}"
             + (f" | {st['message']}" if st["message"] else ""))

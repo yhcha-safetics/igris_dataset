@@ -11,7 +11,12 @@
               sim/objects/pos, quat  (T, K, 3/4) dynamic objects (names in attrs sim.objects)
               sim/grasp              (T, 2)      index into sim.objects held by the left / right hand, -1 none
               sim/locomotion         (T, 3)      thumbstick offset x, y, yaw of the world transform
-    group attrs "sim": scene name and JSON, physics mode, tracker profile, calibration, joint names
+              sim/hand/cmd           (T, 12)     Robros hand command from the grips (igris_pipeline/hands.py):
+                                                 normalized 0..1, motor order (sim.hand_motor_ids)
+              sim/hand/joint_pos     (T, 22)     finger angles it maps to (sim.hand_joint_names), rad
+    group attrs "sim": scene name and JSON, physics mode, tracker profile, calibration, joint names,
+                       hand_motor_ids / hand_motor_labels / hand_joint_names / hand_grip_full_command
+    The controller grips themselves are in raw/buttons/{left,right}_grip.
 """
 from __future__ import annotations
 
@@ -69,6 +74,9 @@ class SimRecorder:
         ep["sim/objects/quat"] = cols["obj_quat"].astype(np.float32)
         ep["sim/grasp"] = cols["grasp"].astype(np.int16)
         ep["sim/locomotion"] = cols["loco"]
+        if "hand_cmd" in cols:
+            ep["sim/hand/cmd"] = cols["hand_cmd"].astype(np.float32)
+            ep["sim/hand/joint_pos"] = cols["hand_q"].astype(np.float32)
         ep.group_attrs["sim"] = {k: (json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v)
                                  for k, v in sim_attrs.items()}
         path = self.out_dir / f"ep_{next_episode_index(self.out_dir):04d}.h5"

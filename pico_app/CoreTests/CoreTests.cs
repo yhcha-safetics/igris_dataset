@@ -120,7 +120,8 @@ static class CoreTests
     static void TestRobotFk(Dictionary<string, object> fx)
     {
         RobotModel r = LoadRobot(fx);
-        Check(r.Nq == 38 && r.JointNames.Count == 31, "nq / joints");
+        // 31 robot joints, + 22 finger joints when the server runs with hand overlays (igris_sim/hand_model.py)
+        Check(r.Nq == 7 + r.JointNames.Count && (r.JointNames.Count == 31 || r.JointNames.Count == 53), "nq / joints");
         var world = new Pose[r.Bodies.Count];
         int cases = 0;
         foreach (var o in L(fx, "fk"))
@@ -312,7 +313,8 @@ static class CoreTests
     static void TestSceneMessage(Dictionary<string, object> fx)
     {
         SceneMessage m = SceneMessage.FromJson(Json.Obj(Json.Get(fx, "scene_message")));
-        Check(m.Name == "tabletop" && m.Spec.Objects.Count > 0 && m.JointNames.Count == 31, "scene message");
+        Check(m.Name == "tabletop" && m.Spec.Objects.Count > 0 && (m.JointNames.Count == 31 || m.JointNames.Count == 53),
+              "scene message");
         Check(m.RobotPath == "_robot/robot.json" && m.Folder == "tabletop", "robot path / scene folder");
         Check(m.AssetBase("10.0.0.5") == "http://10.0.0.5:" + m.AssetPort + "/", "asset base");
         Check(m.Dynamic.Count > 0 && m.Dynamic.TrueForAll(n => m.Spec.Objects.Any(o => o.Name == n && o.Dynamic)), "dynamic names");

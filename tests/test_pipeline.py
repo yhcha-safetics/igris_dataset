@@ -256,6 +256,21 @@ def test_reference_inside_isaac_soft_limits(clip):
     assert checked == 23  # the 23 actuated joints of the Isaac URDF
 
 
+def test_hand_command_matches_robros_layout():
+    from igris_pipeline.hands import HAND_JOINT_NAMES, MOTOR_SLOT_LABELS, command_to_joint_pos, grip_to_command
+
+    cmd = grip_to_command(1.0, 0.5)  # Robros: every motor of a hand = clamp(grip) * 0.6, right hand first
+    assert MOTOR_SLOT_LABELS[0] == "r_thumb_flex" and MOTOR_SLOT_LABELS[6] == "l_thumb_flex"
+    assert np.allclose(cmd[:6], 0.3) and np.allclose(cmd[6:], 0.6)
+    assert np.allclose(grip_to_command([0.0, 2.0], [-1.0, 0.0])[:, 6:], [[0.0] * 6, [0.6] * 6])  # clamped, vectorised
+    q = dict(zip(HAND_JOINT_NAMES, command_to_joint_pos(cmd)))
+    assert np.isclose(q["l_3_joint_index_middle"], 0.6 * np.pi / 2) and np.isclose(q["l_4_joint_index_distal"], q["l_3_joint_index_middle"])
+    assert np.isclose(q["l_2_joint_thumb_distal"], q["l_1_joint_thumb_middle"] * 1.285714286)
+    assert np.isclose(q["l_0_joint_thumb_proximal"], 0.6 * 1.727875959)
+    assert np.isclose(q["r_0_joint_thumb_proximal"], -0.3 * 1.727875959)  # right CMC closes negatively
+    assert np.isclose(q["r_1_joint_thumb_middle"], 0.3 * np.radians(70))
+
+
 def test_exports(tmp_path, clip):
     from igris_pipeline.retarget import export as X
     from igris_pipeline.retarget.retargeter import Retargeter

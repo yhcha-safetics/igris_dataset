@@ -673,6 +673,11 @@ def correct_episode(ep: Episode, cfg_all: dict, profile: str | None = None,
         "proc/controller/left/pos": ctrl["left"][0], "proc/controller/left/quat": ctrl["left"][1],
         "proc/controller/right/pos": ctrl["right"][0], "proc/controller/right/quat": ctrl["right"][1],
     }
+    if "raw/buttons/left_grip" in ep and "raw/buttons/right_grip" in ep:
+        # analog controller grips at the processing rate: the hand command channel of the exports
+        g = np.stack([ep["raw/buttons/left_grip"], ep["raw/buttons/right_grip"]], -1)
+        tu, first = np.unique(t, return_index=True)  # tolerate repeated / jumping stamps like resample_series
+        out["proc/hand/grip"] = np.stack([np.interp(tn, tu, g[first, k]) for k in range(2)], -1).astype(np.float32)
     calib["world_alignment"] = {"origin": origin.round(4).tolist(), "yaw_removed_deg": float(np.degrees(yaw0))}
     stream.update({"origin": origin, "yaw0": float(yaw0), "lengths": np.asarray(lengths, float).copy(),
                    "tracker_roles": roles if not is_body else {}})

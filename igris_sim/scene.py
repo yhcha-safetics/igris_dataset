@@ -152,8 +152,11 @@ def _half_size(shape: str, size) -> list[float]:
     return [s[0], s[1] / 2, 0.0]  # cylinder / capsule: radius, half height
 
 
-def build_model(scene: Scene, robot_mjcf: str | Path = DEFAULT_MJCF) -> tuple[mujoco.MjModel, SceneInfo]:
-    """Compile the IGRIS-C MJCF with the scene's objects and the (inactive) grasp welds."""
+def build_model(scene: Scene, robot_mjcf: str | Path = DEFAULT_MJCF,
+                hands: bool = False) -> tuple[mujoco.MjModel, SceneInfo]:
+    """Compile the IGRIS-C MJCF with the scene's objects and the (inactive) grasp welds.
+
+    hands: add the articulated finger overlays (igris_sim/hand_model.py) after the objects."""
     spec = mujoco.MjSpec.from_file(str(robot_mjcf))
     sp = scene.spec
     floor_cfg = sp.get("floor", {})
@@ -228,6 +231,9 @@ def build_model(scene: Scene, robot_mjcf: str | Path = DEFAULT_MJCF) -> tuple[mu
                                    objtype=mujoco.mjtObj.mjOBJ_BODY, active=False)
             eq.name = f"grasp_{side}_{n}"
             eq.solref = [0.02, 1.0]
+    if hands:
+        from .hand_model import add_hand_overlays
+        add_hand_overlays(spec, HANDS)
 
     model = spec.compile()
     info = SceneInfo(objects=names, body={}, dynamic={}, graspable=graspable, geoms={}, qposadr={})

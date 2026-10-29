@@ -9,6 +9,10 @@ Robot modes (configs/sim.yaml physics.mode):
              igris_pipeline.sim.mujoco_eval.pd_replay. Contacts, joint limits and torque limits are
              physical; the harness force says how much external help the motion needs.
 
+Hands (configs/sim.yaml hands.enabled): the controller grips also close articulated finger overlays
+(igris_sim/hand_model.py) through the Robros hand command (igris_pipeline/hands.py). They are visual
+only; holding an object is the grasp below.
+
 Grasping: pressing a controller grip attaches the nearest graspable object whose surface is within
 grasp.radius of that palm; releasing the grip lets it go (with its current velocity, so it can be
 thrown). In harness mode the attachment is a MuJoCo weld constraint between hand and object; in
@@ -26,6 +30,9 @@ from igris_pipeline.sim.mujoco_eval import (_quat_err, _rotate, apply_joint_para
                                             load_joint_params)
 from igris_pipeline.utils.rotations import quat_conj, quat_mul, quat_normalize, slerp, yaw_quat
 
+from igris_pipeline.hands import HAND_COMMAND_DIM, HAND_JOINT_NAMES, command_to_joint_pos
+
+from .hand_model import HandOverlay
 from .scene import HANDS, Scene, build_model
 
 
@@ -33,7 +40,8 @@ class SimWorld:
     def __init__(self, scene: Scene, sim_cfg: dict, mode: str | None = None):
         self.scene = scene
         self.cfg = sim_cfg
-        self.model, self.info = build_model(scene)
+        self.hands_enabled = bool(sim_cfg.get("hands", {}).get("enabled", False))
+        self.model, self.info = build_model(scene, hands=self.hands_enabled)
         m = self.model
         ph = sim_cfg.get("physics", {})
         m.opt.iterations = int(ph.get("solver_iterations", m.opt.iterations))
@@ -60,6 +68,7 @@ class SimWorld:
             self.h_kp, self.h_kd = float(hc.get("kp", 3000.0)), float(hc.get("kd", 300.0))
         self.palm = {s: r.gid(f"{b}_collision") for s, b in HANDS.items()}
         self.hand_body = {s: r.bid(b) for s, b in HANDS.items()}
+        self.overlay = HandOverlay(m, self.hand_body, HANDS) if self.hands_enabled else None
         g = sim_cfg.get("grasp", {})
         self.grasp_radius = float(g.get("radius", 0.10))
         self.grip_on, self.grip_off = float(g.get("grip_on", 0.6)), float(g.get("grip_off", 0.4))
@@ -84,15 +93,38 @@ class SimWorld:
         m, d = self.model, self.data
         mujoco.mj_resetData(m, d)
         d.eq_active[:] = 0
+        self.hand_cmd = np.zeros(HAND_COMMAND_DIM)
+        self.hand_q = np.zeros(len(HAND_JOINT_NAMES))
         self.grasped = {s: None for s in HANDS}
         self._carried = {}  # kinematic mode: side -> (object, pos in hand frame, quat in hand frame, last pose)
         q = self.spawn_qpos() if q_robot is None else np.asarray(q_robot, float)
         d.qpos[:self.nq_r] = q
         mujoco.mj_forward(m, d)
+        self._update_hands()
         self._q_prev = q.copy()
 
     def robot_qpos(self) -> np.ndarray:
         return self.data.qpos[:self.nq_r].copy()
+
+    # -- hands ----------------------------------------------------------------------------
+    def set_hand_command(self, cmd) -> None:
+        """Normalized Robros hand command (12, motor order); drives the finger overlays."""
+        self.hand_cmd = np.clip(np.asarray(cmd, float), 0.0, 1.0)
+        self.hand_q = command_to_joint_pos(self.hand_cmd)
+
+    def _update_hands(self):
+        if self.overlay is not None:
+            self.overlay.apply(self.data, self.hand_q)
+            mujoco.mj_kinematics(self.model, self.data)
+
+    def joint_names_ext(self) -> list[str]:
+        """Names of qpos_ext()[7:]: the robot joints, then the finger joints when hands are enabled."""
+        return list(self.robot.joint_names) + (list(HAND_JOINT_NAMES) if self.overlay is not None else [])
+
+    def qpos_ext(self) -> np.ndarray:
+        """Robot qpos with the finger angles appended (what the app draws, robot_export layout)."""
+        q = self.robot_qpos()
+        return np.concatenate([q, self.hand_q]) if self.overlay is not None else q
 
     def object_poses(self, names=None):
         names = self.dynamic if names is None else names
@@ -140,6 +172,7 @@ class SimWorld:
             mujoco.mj_kinematics(m, d)
         else:
             self.harness_force = float(np.mean(forces)) / (self.mass * 9.81) * 100.0  # % body weight
+        self._update_hands()  # overlays on the final hand pose (they carry no contacts, so once a tick is enough)
         self._q_prev = q1.copy()
 
     def _full(self, q_robot):

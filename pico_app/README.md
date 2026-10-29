@@ -42,7 +42,13 @@ netsh advfirewall firewall add rule name="IGRIS sim HTTP" dir=in action=allow pr
    - *Active Input Handling*이 바뀌었다는 안내가 나오면 에디터를 다시 시작합니다.
 3. **IGRIS → 2. Build APK**를 실행하면 `pico_app/Builds/IgrisSim.apk`가 만들어집니다.
 
-명령줄로 빌드할 수도 있습니다. Unity를 한 번은 GUI로 열어 라이선스를 활성화한 뒤에 쓸 수 있습니다.
+검증: Unity 2022.3.16f1(Windows 11, 명령줄 빌드)로 빌드해 PICO 4 Ultra Enterprise(A9210, PICO OS 5.15.7)에서
+로봇·씬 표시, 손가락(그립), 상태 창, 녹화까지 확인했습니다. `ProjectSettings/`와 `Packages/packages-lock.json`(PICO SDK 커밋 고정)은
+저장소에 들어 있습니다. 이것 없이 처음 열면 Unity가 `manifest.json`에 템플릿 패키지(ads, purchasing 등)를 넣고
+APK에 광고·결제 권한이 붙으니, 그런 경우 `manifest.json`을 되돌리고 다시 빌드합니다.
+
+명령줄로 빌드할 수도 있습니다. Unity Hub에서 로그인하고 Personal 라이선스를 활성화한 뒤에 쓸 수 있습니다.
+(Unity Hub로 설치한 에디터 경로 예: `%USERPROFILE%\Unity\Hub\Editor\2022.3.16f1\Editor\Unity.exe`)
 
 ```powershell
 $unity = "C:\Program Files\Unity\Hub\Editor\<버전>\Editor\Unity.exe"
@@ -71,7 +77,7 @@ PC에서 서버를 띄웁니다.
 |---|---|
 | 오른손 A | 에피소드 녹화 시작 / 정지 (서버를 `--record-dir`로 실행한 경우) |
 | 오른손 B | 녹화 중 이벤트 마커 |
-| 그립(좌/우) | 손 가까이(10 cm)의 물체 잡기 / 놓기. 놓을 때 손을 휘두르면 던질 수 있습니다 |
+| 그립(좌/우) | 로봇 손가락이 그립을 쥔 만큼 오므라듭니다. 손 가까이(10 cm)의 물체 잡기 / 놓기. 놓을 때 손을 휘두르면 던질 수 있습니다 |
 | 왼쪽 스틱 | 바라보는 방향 기준 이동 |
 | 오른쪽 스틱 좌우 | 회전 |
 | 왼손 Y 1초 | 다시 보정 |
@@ -114,6 +120,7 @@ PC에서 서버를 띄웁니다.
 ### 녹화한 데이터
 
 `--record-dir`로 저장한 에피소드는 기존 h5 형식(`raw/*`)에 시뮬레이션 결과(`sim/*`)가 추가된 것입니다.
+손 명령(`sim/hand/cmd`, Robros 정규화 12개)과 손가락 각도(`sim/hand/joint_pos`)도 함께 저장됩니다.
 `scripts/run_pipeline.py`로 오프라인 고품질 보정과 리타게팅을 다시 할 수 있습니다.
 
 ## 4. 헤드셋 없이 에디터에서 시험
@@ -137,6 +144,8 @@ Unity 에디터에서 `Assets/IgrisPico/Scenes/Main.unity`를 열고 Play를 누
 | *Robot download failed* | 방화벽 TCP 9871이 열렸는지 확인합니다 |
 | 글자가 한쪽 눈에만 보임 | `Assets/XR/Settings/PXR_Settings`에서 Stereo Rendering Mode를 MultiPass로 바꿉니다 |
 | 몸이 따라오지 않음 (`hmd_3pt`로 동작) | 메뉴 Trackers가 PICO 모션 트래커 앱의 모드와 같은지 확인하고, 트래커를 보정한 뒤 Recalibrate를 실행합니다 |
+| 상태 창 `trackers body (no body data (BT_MESSAGE_UNKNOWN))` | 트래커 착용 보정이 풀린 상태입니다(헤드셋을 켤 때마다 다시 해야 함, `adb logcat`의 `Swifter_StatusInfo`에서 `WearCalibStatus:0`). 메뉴 *Motion Tracker calibration*으로 보정한 뒤 *Recalibrate* |
+| PC와 헤드셋이 다른 서브넷(예: PC는 유선 교내망, 헤드셋은 공유기 Wi-Fi) | 브로드캐스트가 닿지 않으므로 아래처럼 `igris_pico.json`에 PC 주소를 넣습니다. 헤드셋 → PC 방향 UDP/TCP는 공유기를 넘어 동작합니다. USB(`adb reverse`)는 UDP를 넘기지 못해 이 앱에는 쓸 수 없습니다 |
 
 서버 주소를 직접 지정하려면 다음 파일을 만들어 넣습니다.
 
