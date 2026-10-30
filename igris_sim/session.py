@@ -10,7 +10,8 @@ Life cycle
 
 Controller mapping (right / left as on the PICO controllers)
   A          start / stop an episode          B          event marker
-  grips      close that robot hand (analog, Robros hand command) and grasp / release
+  grips      close that robot hand (analog, Robros hand command); with physical hands objects are
+             held by the fingers' contact, otherwise (grasp.mode weld) the grip grasps / releases
   hold Y     recalibrate
   left stick move (relative to the head)      right stick x  turn about the robot
 
@@ -265,7 +266,10 @@ class SimSession:
                      "profile": self.profile or "", "calibration": self.calibration or {}, "fps": self.fps,
                      "objects": self.world.dynamic, "joint_names": list(self.world.robot.joint_names),
                      "hand_motor_ids": list(MOTOR_IDS), "hand_motor_labels": list(MOTOR_SLOT_LABELS),
-                     "hand_joint_names": list(HAND_JOINT_NAMES), "hand_grip_full_command": self.grip_full}
+                     "hand_joint_names": list(HAND_JOINT_NAMES), "hand_grip_full_command": self.grip_full,
+                     "grasp_mode": self.world.grasp_mode, "grasp_cfg": self.cfg.get("grasp", {})}
+        if self.world.physical:
+            sim_attrs["hand_physics"] = self.world.hand_params
         path = self.recorder.stop(meta, sim_attrs)
         if path is None:
             self._event("record", "discarded (too short)")
@@ -283,7 +287,9 @@ class SimSession:
                 "contact": self.pose.contact.copy(), "obj_pos": pos, "obj_quat": quat,
                 "grasp": np.array([names.index(w.grasped[s]) if w.grasped[s] in names else -1
                                    for s in ("left", "right")]),
-                "loco": self.loco.copy(), "hand_cmd": w.hand_cmd.copy(), "hand_q": w.hand_q.copy()}
+                "loco": self.loco.copy(), "hand_cmd": w.hand_cmd.copy(), "hand_q": w.hand_q.copy(),
+                **({"hand_target": w.hand_target.copy(), "hand_pose": w.hand_poses(),
+                    "hand_force": w.hand_force.copy()} if w.physical else {})}
 
     # ---- commands from the app / CLI -------------------------------------------------------
     def command(self, msg: dict) -> dict:
@@ -368,8 +374,8 @@ class SimSession:
             "profile": self.profile, "mode": w.mode, "scene": w.scene.name,
             "robot": {"qpos": _r(w.qpos_ext())},
             "objects": {"pos": _r(pos), "quat": _r(quat)},
-            "grasp": {s: w.grasped[s] for s in ("left", "right")},
-            "hand_cmd": _r(w.hand_cmd, 3),
+            "grasp": {s: w.grasped[s] for s in ("left", "right")}, "grasp_mode": w.grasp_mode,
+            "hand_cmd": _r(w.hand_cmd, 3), "hand_force": _r(w.hand_force, 2),
             "rig": {"pos": _r(rig_p), "quat": _r(rig_q)},
             "head_cam": {"pos": _r(cam_p), "quat": _r(cam_q)},
             "recording": bool(self.recorder is not None and self.recorder.active),
@@ -398,8 +404,10 @@ class SimSession:
 def summary_line(s: SimSession) -> str:
     st = s.state_message()
     tm = st["timing_ms"]
+    force = st["hand_force"]
     return (f"[{st['status']}] profile={st['profile']} mode={st['mode']} scene={st['scene']} frames={st['frames']} "
             f"correct={tm['correct_ms']:.1f}ms ik={tm['retarget_ms']:.1f}ms phys={tm['physics_ms']:.1f}ms "
             f"hand=L{st['hand_cmd'][6]:.2f}/R{st['hand_cmd'][0]:.2f} "
-            f"grasp={json.dumps(st['grasp'])} rec={st['recording']} saved={st['episodes']}"
+            + (f"force=L{force[0]:.0f}/R{force[1]:.0f}N " if st["grasp_mode"] == "physics" else "")
+            + f"grasp={json.dumps(st['grasp'])} rec={st['recording']} saved={st['episodes']}"
             + (f" | {st['message']}" if st["message"] else ""))

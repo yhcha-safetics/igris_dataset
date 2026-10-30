@@ -9,7 +9,8 @@ namespace IgrisPico.Core
         public string Name;
         public int Parent;            // index into Bodies, -1 = world
         public Pose Local;            // pose in the parent frame at zero joint angle
-        public bool Free;             // root with a free joint: pose = qpos[0:7]
+        public bool Free;             // free joint: world pose = qpos[FreeQpos .. FreeQpos + 7]
+        public int FreeQpos;          // 0 for the robot root; physical hands read the tail of qpos
         public int Qpos = -1;         // hinge: index into qpos
         public V3 Axis, JointPos;
         public double Ref;
@@ -51,7 +52,11 @@ namespace IgrisPico.Core
                 if (body.Parent >= r.Bodies.Count) throw new FormatException("body " + body.Name + ": parent listed after child");
                 var j = Json.Obj(Json.Get(b, "joint"));
                 string jt = Json.Str(Json.Get(j, "type"));
-                if (jt == "free") body.Free = true;
+                if (jt == "free")
+                {
+                    body.Free = true;
+                    body.FreeQpos = (int)Json.Num(Json.Get(j, "qpos"), 0);
+                }
                 else if (jt == "hinge")
                 {
                     body.Qpos = (int)Json.Num(Json.Get(j, "qpos"));
@@ -85,11 +90,11 @@ namespace IgrisPico.Core
             for (int k = 0; k < Bodies.Count; k++)
             {
                 RobotBody b = Bodies[k];
-                if (b.Free)
+                if (b.Free && b.FreeQpos + 7 <= qpos.Length)
                 {
-                    world[k] = new Pose(V3.From(qpos, 0), Q4.From(qpos, 3).Normalized());
+                    world[k] = new Pose(V3.From(qpos, b.FreeQpos), Q4.From(qpos, b.FreeQpos + 3).Normalized());
                     continue;
-                }
+                }  // (a free body without its pose in qpos stays at its parent)
                 Pose x = (b.Parent >= 0 ? world[b.Parent] : Pose.Identity) * b.Local;
                 if (b.Qpos >= 0 && b.Qpos < qpos.Length)
                 {

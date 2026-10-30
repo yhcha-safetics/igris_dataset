@@ -32,13 +32,20 @@ def world():
     return SimWorld(load_scene("tabletop"), load_sim_config())
 
 
+def _random_pose(rng, center):
+    q = rng.normal(size=4)
+    return np.concatenate([center + rng.uniform(-0.5, 0.5, 3), q / np.linalg.norm(q)])
+
+
 def _random_qpos(w, rng):
-    """Random qpos in the app layout (SimWorld.qpos_ext: robot, then finger angles if hands are on)."""
+    """Random qpos in the app layout (SimWorld.qpos_ext: robot, the finger angles if hands are on,
+    and the root poses of physical hands)."""
     q = w.qpos_ext()
-    q[:3] += rng.uniform(-0.5, 0.5, 3)
-    q[3:7] = rng.normal(size=4)
-    q[3:7] /= np.linalg.norm(q[3:7])
-    q[7:] = rng.uniform(-1.2, 1.2, len(q) - 7)
+    q[:7] = _random_pose(rng, q[:3])
+    nj = len(w.joint_names_ext())
+    q[7:7 + nj] = rng.uniform(-1.2, 1.2, nj)
+    for k in range(7 + nj, len(q), 7):
+        q[k:k + 7] = _random_pose(rng, q[k:k + 3])
     return q
 
 
@@ -46,7 +53,13 @@ def _mj_poses(w, q):
     m, d = w.model, w.data
     d.qpos[:w.nq_r] = q[:w.nq_r]
     mujoco.mj_kinematics(m, d)
-    if w.overlay is not None:  # finger overlays on the hands, angles from the tail of q
+    if w.overlay is not None and w.overlay.physical:  # finger angles, then the free hand roots
+        d.qpos[w.overlay.qposadr] = q[w.nq_r:w.nq_r + 22]
+        for k, s in enumerate(("left", "right")):
+            a = w.overlay.free_q[s]
+            d.qpos[a:a + 7] = q[w.nq_r + 22 + 7 * k:w.nq_r + 29 + 7 * k]
+        mujoco.mj_kinematics(m, d)
+    elif w.overlay is not None:  # finger overlays on the hands, angles from the tail of q
         w.overlay.apply(d, np.asarray(q[w.nq_r:]))
         mujoco.mj_kinematics(m, d)
     return d
@@ -62,7 +75,8 @@ def test_robot_description_matches_mujoco(world):
     desc, files = robot_description(world)
     m = world.model
     n_hand = 22 if world.overlay is not None else 0
-    assert world.nq_r == 38 and desc["nq"] == 38 + n_hand and len(desc["joint_names"]) == 31 + n_hand
+    n_free = 14 if world.overlay is not None and world.overlay.physical else 0
+    assert world.nq_r == 38 and desc["nq"] == 38 + n_hand + n_free and len(desc["joint_names"]) == 31 + n_hand
     assert desc["joint_names"] == world.joint_names_ext()
     assert all(b["parent"] < k for k, b in enumerate(desc["bodies"]))
     rng = np.random.default_rng(1)

@@ -10,17 +10,33 @@ calibration:
 
 physics:
   mode: kinematic           # kinematic | harness (see igris_sim/world.py)
+  timestep: 0.002           # s; the MJCF's 0.005 is too coarse for finger contacts
+  impratio: 10              # friction / normal impedance ratio (elliptic cones): firm grasps, less slip
   solver_iterations: 50     # the MJCF's 500 iterations + 100 noslip are tuned for offline accuracy
   noslip_iterations: 0
   harness: {kp: 3000.0, kd: 300.0, gain_scale: 4.0}
 
 hands:                      # robot fingers follow the analog controller grips (igris_pipeline/hands.py)
-  enabled: true             # articulated finger overlays on the hands (visual; holding objects = grasp below)
+  enabled: true             # articulated fingers on the hands (igris_sim/hand_model.py)
   grip_full_command: 0.6    # normalized hand command at a fully squeezed grip (Robros' default)
+  physics:                  # physical hands (grasp.mode physics); defaults: hand_model.DEFAULT_PHYSICS
+    kp: 3000.0              # N/m: spring that pulls the hand onto the robot hand ...
+    kd: 70.0                # N s/m
+    max_force: 120.0        # N: ... limited, so the hand stops at a surface / squeezes with at most this
+    kp_rot: 30.0            # N m/rad
+    kd_rot: 0.5
+    max_torque: 12.0        # N m
+    finger_kp: 2.0          # N m/rad: finger motor servos
+    finger_max_torque: 0.6  # N m (about 7 N at the fingertip)
+    friction: [1.2, 0.01, 0.0002]
 
 grasp:
-  radius: 0.10              # m between the palm collider and the object surface
-  grip_on: 0.6              # controller grip value that starts a grasp
+  mode: physics             # physics: held by contact forces / friction only; weld: grip attaches the nearest object
+  hold_force: 1.0           # physics: N of hand contact force on a squeezed / carried object that counts as a grasp
+  release_force: 0.3        # ... below this for release_time_s ends it
+  release_time_s: 0.1
+  radius: 0.10              # weld: m between the palm collider and the object surface
+  grip_on: 0.6              # weld: controller grip value that starts a grasp
   grip_off: 0.4             # ... and releases it
 
 locomotion:                 # thumbstick locomotion on top of the tracked motion

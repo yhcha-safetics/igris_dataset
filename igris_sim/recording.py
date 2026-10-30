@@ -10,12 +10,20 @@
               sim/human/contact      (T, 2)
               sim/objects/pos, quat  (T, K, 3/4) dynamic objects (names in attrs sim.objects)
               sim/grasp              (T, 2)      index into sim.objects held by the left / right hand, -1 none
+                                                 (grasp.mode physics: held by contact, see igris_sim/world.py)
               sim/locomotion         (T, 3)      thumbstick offset x, y, yaw of the world transform
               sim/hand/cmd           (T, 12)     Robros hand command from the grips (igris_pipeline/hands.py):
                                                  normalized 0..1, motor order (sim.hand_motor_ids)
-              sim/hand/joint_pos     (T, 22)     finger angles it maps to (sim.hand_joint_names), rad
+              sim/hand/joint_pos     (T, 22)     finger angles (sim.hand_joint_names), rad: with physical
+                                                 hands the simulated ones (they stop on contact), else the
+                                                 command's
+            physical hands only (grasp.mode physics):
+              sim/hand/joint_target  (T, 22)     finger angles the command maps to, rad
+              sim/hand/pose          (T, 2, 7)   left / right hand root pose [pos, quat wxyz], world
+              sim/hand/force         (T, 2)      contact normal force of each hand on objects, N
     group attrs "sim": scene name and JSON, physics mode, tracker profile, calibration, joint names,
-                       hand_motor_ids / hand_motor_labels / hand_joint_names / hand_grip_full_command
+                       hand_motor_ids / hand_motor_labels / hand_joint_names / hand_grip_full_command,
+                       grasp_mode / grasp_cfg (/ hand_physics)
     The controller grips themselves are in raw/buttons/{left,right}_grip.
 """
 from __future__ import annotations
@@ -77,6 +85,10 @@ class SimRecorder:
         if "hand_cmd" in cols:
             ep["sim/hand/cmd"] = cols["hand_cmd"].astype(np.float32)
             ep["sim/hand/joint_pos"] = cols["hand_q"].astype(np.float32)
+        if "hand_pose" in cols:
+            ep["sim/hand/joint_target"] = cols["hand_target"].astype(np.float32)
+            ep["sim/hand/pose"] = cols["hand_pose"].astype(np.float32)
+            ep["sim/hand/force"] = cols["hand_force"].astype(np.float32)
         ep.group_attrs["sim"] = {k: (json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v)
                                  for k, v in sim_attrs.items()}
         path = self.out_dir / f"ep_{next_episode_index(self.out_dir):04d}.h5"

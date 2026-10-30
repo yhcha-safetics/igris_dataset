@@ -120,8 +120,11 @@ static class CoreTests
     static void TestRobotFk(Dictionary<string, object> fx)
     {
         RobotModel r = LoadRobot(fx);
-        // 31 robot joints, + 22 finger joints when the server runs with hand overlays (igris_sim/hand_model.py)
-        Check(r.Nq == 7 + r.JointNames.Count && (r.JointNames.Count == 31 || r.JointNames.Count == 53), "nq / joints");
+        // 31 robot joints, + 22 finger joints when the server runs with hand overlays (igris_sim/hand_model.py),
+        // + 2 x 7 root poses of physical hands
+        int free = 0;
+        foreach (var b in r.Bodies) if (b.Free && b.FreeQpos > 0) free += 7;
+        Check(r.Nq == 7 + r.JointNames.Count + free && (r.JointNames.Count == 31 || r.JointNames.Count == 53), "nq / joints");
         var world = new Pose[r.Bodies.Count];
         int cases = 0;
         foreach (var o in L(fx, "fk"))

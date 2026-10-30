@@ -6,10 +6,10 @@ re-centres meshes when it compiles them, so the MJCF and STL files alone would p
 The server publishes the result under `_robot/` on the asset HTTP server.
 
     robot.json
-    {"format": "igris_robot", "version": 1, "nq": 38,
-     "joint_names": [...],                            order of qpos[7:]
+    {"format": "igris_robot", "version": 1, "nq": 38,     length of the qpos the app gets
+     "joint_names": [...],                            order of qpos[7:7 + len(joint_names)]
      "bodies": [{"name", "parent": index (-1 = world), "pos": [3], "quat": [w, x, y, z],
-                 "joint": null | {"type": "free"}
+                 "joint": null | {"type": "free", "qpos": i (default 0)}
                                | {"type": "hinge", "qpos": i, "axis": [3], "pos": [3], "ref": r}}],
      "geoms":  [{"name", "body": index, "pos", "quat", "rgba",
                  "type": "mesh", "mesh": "meshes/<name>.obj"}
@@ -17,7 +17,7 @@ The server publishes the result under `_robot/` on the asset HTTP server.
     meshes/<name>.obj   vertices and triangles in the geom frame (MuJoCo axes, metres)
 
 Bodies are listed parents first. Forward kinematics, as in mj_kinematics:
-    free joint   x_pos = qpos[0:3], x_quat = qpos[3:7]
+    free joint   x_pos = qpos[i:i + 3], x_quat = qpos[i + 3:i + 7]  (world pose, the parent is ignored)
     otherwise    x_pos = parent_pos + R(parent_quat) pos, x_quat = parent_quat * quat
                  hinge: anchor = x_pos + R(x_quat) jpos
                         x_quat = x_quat * axis_angle(axis, qpos[i] - ref), x_pos = anchor - R(x_quat) jpos
@@ -47,24 +47,29 @@ def robot_description(world) -> tuple[dict, dict[str, bytes]]:
     """(robot.json content, {relative path: file bytes}) for the robot of a SimWorld.
 
     With hand overlays (igris_sim/hand_model.py) their bodies are published as children of the
-    robot hands (the overlay root sits exactly on the hand) and their joints read
-    qpos[world.nq_r + k] for the k-th of world.joint_names_ext()[31:], i.e. the layout of
-    SimWorld.qpos_ext() that state.robot.qpos carries."""
+    robot hands and their joints read qpos[world.nq_r + k] for the k-th of
+    world.joint_names_ext()[31:], i.e. the layout of SimWorld.qpos_ext() that state.robot.qpos
+    carries. A visual overlay root sits exactly on its hand; a physical hand moves on its own (it
+    stops at surfaces), so its root gets a free joint reading its world pose from the tail of qpos_ext."""
     m = world.model
     bodies = [b for b in range(1, m.nbody) if world._is_robot_body(b)]  # body ids are parents-first
     overlay = getattr(world, "overlay", None)
-    roots = {}
+    roots, free_qpos = {}, {}
     if overlay is not None:
         roots = {r: world.hand_body[s] for s, r in overlay.root.items()}
+        if overlay.physical:  # qpos_ext: robot, fingers, then the left and right root poses
+            tail = world.nq_r + len(world.joint_names_ext()) - len(world.robot.joint_names)
+            free_qpos = {overlay.root[s]: tail + 7 * k for k, s in enumerate(("left", "right"))}
         bodies += [b for b in range(1, m.nbody) if overlay.is_overlay_body(m, b)]
         ext_names = world.joint_names_ext()
         ext_qpos = {n: world.nq_r + k for k, n in enumerate(ext_names[len(world.robot.joint_names):])}
     index = {b: k for k, b in enumerate(bodies)}
     out_bodies = []
     for b in bodies:
-        if b in roots:  # overlay root: rigidly on the hand (its mocap pose is the hand pose)
+        if b in roots:  # overlay root: rigidly on the hand (visual: its mocap pose is the hand pose) or free
+            joint = {"type": "free", "qpos": free_qpos[b]} if b in free_qpos else None
             out_bodies.append({"name": mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, b), "parent": index[roots[b]],
-                               "pos": [0.0, 0.0, 0.0], "quat": [1.0, 0.0, 0.0, 0.0], "joint": None})
+                               "pos": [0.0, 0.0, 0.0], "quat": [1.0, 0.0, 0.0, 0.0], "joint": joint})
             continue
         if m.body_jntnum[b] > 1:
             raise ValueError(f"body {mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, b)}: more than one joint")
@@ -104,7 +109,7 @@ def robot_description(world) -> tuple[dict, dict[str, bytes]]:
             continue
         geoms.append(e)
     names = world.joint_names_ext() if overlay is not None else list(world.robot.joint_names)
-    desc = {"format": FORMAT, "version": VERSION, "nq": 7 + len(names),
+    desc = {"format": FORMAT, "version": VERSION, "nq": len(world.qpos_ext()),
             "joint_names": names, "bodies": out_bodies, "geoms": geoms}
     files["robot.json"] = json.dumps(desc, separators=(",", ":")).encode("utf-8")
     return desc, files
@@ -127,7 +132,8 @@ def forward_kinematics(desc: dict, qpos) -> tuple[np.ndarray, np.ndarray]:
     for k, b in enumerate(desc["bodies"]):
         j = b["joint"]
         if j is not None and j["type"] == "free":
-            xpos[k], xquat[k] = qpos[0:3], quat_normalize(qpos[3:7])
+            a = j.get("qpos", 0)
+            xpos[k], xquat[k] = qpos[a:a + 3], quat_normalize(qpos[a + 3:a + 7])
             continue
         pp, pq = (xpos[b["parent"]], xquat[b["parent"]]) if b["parent"] >= 0 else (np.zeros(3), np.array([1.0, 0, 0, 0]))
         p = pp + quat_apply(pq, np.asarray(b["pos"], float))

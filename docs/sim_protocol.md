@@ -122,7 +122,8 @@ XRoboToolkit도 같은 native 값을 보냅니다. XRoboToolkit 앱은 바디 �
 
 - `dynamic`: `state.objects`의 순서입니다. 고정 물체는 `spec`에서 한 번만 만들면 됩니다.
 - `joint_names`: `state.robot.qpos[7:]`의 관절 순서입니다. 로봇 31개 뒤에 손가락 22개가 옵니다
-  (`configs/sim.yaml`의 `hands.enabled`가 꺼져 있으면 로봇 31개만).
+  (`configs/sim.yaml`의 `hands.enabled`가 꺼져 있으면 로봇 31개만). 물리 손(`grasp.mode: physics`, 기본)에서는
+  그 뒤에 왼손·오른손 루트 자세 `[x, y, z, qw, qx, qy, qz]` 두 개(14개)가 더 붙습니다(관절 이름 없음, 5장 참고).
 - `folder`: 씬 파일(메시)의 위치입니다. 파일 주소는 `<assets><folder>/<file>`입니다. 값이 `null`이면 `scenes/` 밖의 씬이라 메시를 받을 수 없습니다.
 - `robot`: 로봇 모델(5장)의 주소이며, `assets` 기준 상대 경로입니다.
 
@@ -131,7 +132,7 @@ XRoboToolkit도 같은 native 값을 보냅니다. XRoboToolkit 앱은 바디 �
 ```json
 {"v": 1, "type": "state", "t": 1761100000.123, "status": "running", "message": "", "progress": 1.0,
  "profile": "body_2trk", "mode": "kinematic", "scene": "tabletop",
- "robot": {"qpos": [x, y, z, qw, qx, qy, qz, j0, ..., j30]},
+ "robot": {"qpos": [x, y, z, qw, qx, qy, qz, j0, ..., j52, 왼손 루트 7개, 오른손 루트 7개]},
  "objects": {"pos": [[x, y, z], ...], "quat": [[w, x, y, z], ...]},
  "grasp": {"left": "cube_red", "right": null},
  "rig": {"pos": [x, y, z], "quat": [w, x, y, z]},
@@ -144,8 +145,10 @@ XRoboToolkit도 같은 native 값을 보냅니다. XRoboToolkit 앱은 바디 �
 | 필드 | 설명 |
 |---|---|
 | `status` | `calibrating`(가만히 서 있기, `progress` 0–1) / `running`. 보정 실패 사유는 `message`에 표시됩니다 |
-| `robot.qpos` | 루트 위치, 루트 쿼터니언(wxyz), 관절각(rad, `joint_names` 순서: 로봇 31개 + 손가락 22개) |
+| `robot.qpos` | 루트 위치, 루트 쿼터니언(wxyz), 관절각(rad, `joint_names` 순서: 로봇 31개 + 손가락 22개), 물리 손의 루트 자세(왼손, 오른손). 길이 74 |
 | `hand_cmd` | 손 명령 12개(0–1, Robros 정규화 형식, 모터 순서 오른손 11–16 → 왼손 21–26). 아래 6장 참고 |
+| `hand_force` | 왼손·오른손이 물체를 누르는 접촉 수직력 합(N). 물리 손에서만 0이 아닙니다 |
+| `grasp_mode` | `physics`(접촉·마찰로 잡기) 또는 `weld`(그립을 쥐면 가까운 물체가 붙음) |
 | `objects` | `dynamic` 순서의 물체 월드 포즈 |
 | `rig` | **트래킹 공간 → 월드** 변환입니다. XR Origin을 `FromMj(rig.pos)`, `FromMjQuat(rig.quat)`에 두면 사용자의 시점이 시뮬레이션 월드와 맞습니다(보정 정렬, 스폰, 썸스틱 이동이 모두 반영됨) |
 | `head_cam` | 로봇 머리(눈) 카메라 포즈. 로봇 시점 모드에 씁니다 |
@@ -159,7 +162,7 @@ MJCF와 STL을 그대로 쓰지 않는 이유는 MuJoCo가 컴파일하면서 �
 원본 파일로 그리면 위치가 어긋납니다.
 
 ```json
-{"format": "igris_robot", "version": 1, "nq": 60, "joint_names": [...31개 + 손가락 22개],
+{"format": "igris_robot", "version": 1, "nq": 74, "joint_names": [...31개 + 손가락 22개],
  "bodies": [{"name": "base_link", "parent": -1, "pos": [0,0,0], "quat": [1,0,0,0], "joint": {"type": "free"}},
             {"name": "Link_Waist_Yaw", "parent": 0, "pos": [...], "quat": [...],
              "joint": {"type": "hinge", "qpos": 7, "axis": [0,0,1], "pos": [0,0,0], "ref": 0.0}}, ...],
@@ -169,7 +172,7 @@ MJCF와 STL을 그대로 쓰지 않는 이유는 MuJoCo가 컴파일하면서 �
 
 - 바디는 부모가 먼저 나오는 순서이고, 메시 OBJ는 geom 좌표계(MuJoCo 축, m) 값입니다.
 - FK 순서는 다음과 같습니다.
-  1. free 루트: `qpos[0:7]`를 그대로 씁니다.
+  1. free 바디: `qpos[i:i+7]`(월드 자세, `joint.qpos`가 없으면 i = 0)를 그대로 씁니다. 부모는 무시합니다.
   2. 그 밖의 바디: `x = parent * (pos, quat)`.
   3. hinge가 있는 바디: 앵커(`pos`)를 중심으로 `axis` 둘레로 `qpos[i] - ref`만큼 회전합니다.
   4. geom: `body * (pos, quat)`.
@@ -178,6 +181,9 @@ MJCF와 STL을 그대로 쓰지 않는 이유는 MuJoCo가 컴파일하면서 �
   `igris_sim/hand_model.py`)을 얹고 원래 손 메시는 내보내지 않습니다. 손가락 바디는 손 바디(`Left_Hand`, `Right_Hand`)의
   자식으로 나오고, 관절의 `qpos` 인덱스는 38 이상(로봇 뒤)입니다. 관절 이름은 Robros 손 레이아웃(`l_0_joint_thumb_proximal`
   … `r_10_joint_little_distal`)과 같습니다. 앱은 다른 관절과 똑같이 FK로 그리면 됩니다.
+- **물리 손**: 물리 손은 로봇 손목을 스프링으로 따라가다가 물체·책상에 닿으면 그 표면에서 멈추므로, 로봇 손 자세와 다를 수 있습니다.
+  그래서 손 루트 바디는 `{"type": "free", "qpos": 60}`(왼손), `{"type": "free", "qpos": 67}`(오른손)로 나오며,
+  앱은 `qpos`의 그 위치에서 손의 월드 자세를 읽습니다. 손가락 각도도 시뮬레이션 값(접촉하면 그 자리에서 멈춘 각도)입니다.
 
 ## 6. 조작
 
@@ -185,7 +191,7 @@ MJCF와 STL을 그대로 쓰지 않는 이유는 MuJoCo가 컴파일하면서 �
 |---|---|
 | 오른손 A | 에피소드 녹화 시작 / 정지 (서버를 `--record-dir`로 실행한 경우) |
 | 오른손 B | 녹화 중 이벤트 마커 |
-| 그립(좌/우, 아날로그) | 그 손의 로봇 손가락을 그립 값만큼 오므림(손 명령 = 그립 × 0.6) + 손바닥 10 cm 안의 가장 가까운 물체 잡기 / 놓기 |
+| 그립(좌/우, 아날로그) | 그 손의 로봇 손가락을 그립 값만큼 오므림(손 명령 = 그립 × 0.6). 물리 그립에서는 손가락이 물체에 닿아 쥐어야 잡히고, `weld`에서는 손바닥 10 cm 안의 가장 가까운 물체가 붙음 |
 | 왼쪽 스틱 | 머리가 향한 방향 기준으로 이동 (최대 1 m/s) |
 | 오른쪽 스틱 좌우 | 로봇 위치를 중심으로 회전 (최대 90°/s) |
 | Y 1초 누르기 | 다시 보정 |

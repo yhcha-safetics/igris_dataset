@@ -8,6 +8,7 @@ from pathlib import Path
 import mujoco
 import numpy as np
 import pytest
+from scipy.spatial.transform import Rotation as R
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -21,7 +22,8 @@ from igris_pipeline.pico.xrt_source import FrameBuffer  # noqa: E402
 from igris_pipeline.retarget.robot import IgrisModel  # noqa: E402
 from igris_pipeline.utils.rotations import quat_apply, quat_mul, rot_to_quat  # noqa: E402
 from igris_sim import protocol  # noqa: E402
-from igris_sim.scene import build_model, list_scenes, load_scene, validate  # noqa: E402
+from igris_sim.hand_model import pose_rate  # noqa: E402
+from igris_sim.scene import Scene, build_model, list_scenes, load_scene, validate  # noqa: E402
 from igris_sim.session import SimSession, load_sim_config  # noqa: E402
 from igris_sim.sources import EpisodeReplaySource  # noqa: E402
 from igris_sim.streaming import Biquad, StreamingCorrector, StreamingRetargeter  # noqa: E402
@@ -50,6 +52,11 @@ def frame_times(frames):
 @pytest.fixture(scope="module")
 def cfg():
     return load_sim_config()
+
+
+@pytest.fixture(scope="module")
+def weld_cfg(cfg):
+    return {**cfg, "grasp": {**cfg["grasp"], "mode": "weld"}}
 
 
 # -- scenes -----------------------------------------------------------------------------
@@ -153,8 +160,8 @@ def _place_near_palm(w, obj, gap=0.03):
 
 
 @pytest.mark.parametrize("mode", ["kinematic", "harness"])
-def test_grasp_follows_hand_and_releases(cfg, mode):
-    w = SimWorld(load_scene("tabletop"), cfg, mode)
+def test_grasp_follows_hand_and_releases(weld_cfg, mode):
+    w = SimWorld(load_scene("tabletop"), weld_cfg, mode)
     _place_near_palm(w, "cube_red")
     assert w.update_grasp({"left": 1.0, "right": 0.0}) == [("left", "grasp", "cube_red")]
     body, hand = w.info.body["cube_red"], w.hand_body["left"]
@@ -184,9 +191,145 @@ def test_grasp_follows_hand_and_releases(cfg, mode):
     assert np.linalg.norm(v) < 0.05  # and comes to rest (on the table or the floor)
 
 
-def test_grasp_needs_proximity(cfg):
-    w = SimWorld(load_scene("tabletop"), cfg)
+def test_grasp_needs_proximity(weld_cfg):
+    w = SimWorld(load_scene("tabletop"), weld_cfg)
     assert w.update_grasp({"left": 1.0, "right": 1.0}) == []  # nothing within reach at the spawn pose
+
+
+# -- physical hands (grasp.mode physics) ------------------------------------------------------------
+def _hand_quat(x, y, z):
+    """Hand orientation from its axes in the world (z: fingers, y: palm normal of the left hand)."""
+    return rot_to_quat(R.from_matrix(np.stack([x, y, z], axis=1)))
+
+
+def _bench_scene(*objects):
+    """A table (top at z = 0.75) with the given objects."""
+    table = {"name": "table", "pos": [0.8, 0.0, 0.0], "rgba": [0.55, 0.4, 0.28, 1.0],
+             "geoms": [{"shape": "box", "size": [0.7, 1.2, 0.04], "pos": [0.0, 0.0, 0.73]},
+                       {"shape": "box", "size": [0.05, 0.05, 0.71], "pos": [0.0, 0.0, 0.355]}]}
+    spec = {"format": "igris_scene", "version": 1, "name": "bench", "objects": [table, *objects]}
+    return Scene(spec, ROOT / "scenes" / "tabletop")
+
+
+def _script_hands(w, poses_at):
+    """Drive the physical hands along poses_at(t) -> {side: (pos, quat)} instead of the robot hands."""
+    clock = [0.0]
+
+    def targets(q0, q1, h):
+        a = poses_at(clock[0])
+        clock[0] += h
+        b = poses_at(clock[0])
+        return {s: (*b[s], *pose_rate(*a[s], *b[s], h)) for s in b}
+
+    w._hand_targets = targets
+    w.overlay.place(w.data, poses_at(0.0))
+    mujoco.mj_forward(w.model, w.data)
+
+
+def _run_world(w, seconds, grips=lambda t: (0.0, 0.0), log=None):
+    from igris_pipeline.hands import grip_to_command
+    q = w.robot_qpos()
+    events = []
+    for k in range(int(round(seconds * 50))):
+        g = grips(k / 50)
+        w.set_hand_command(grip_to_command(*g))
+        events += w.update_grasp({"left": g[0], "right": g[1]})
+        w.step(q, 0.02)
+        if log is not None:
+            log.append(w.data.xpos[list(w.body_object)].copy())
+    return events + w.update_grasp({})
+
+
+@pytest.mark.parametrize("mode", ["kinematic", "harness"])
+def test_physical_hands_follow_the_robot_hands(cfg, mode):
+    from igris_pipeline.hands import command_to_joint_pos, grip_to_command
+    w = SimWorld(load_scene("empty"), cfg, mode)
+    assert w.physical and w.grasp_mode == "physics" and len(w.qpos_ext()) == 38 + 22 + 14
+    q = w.robot_qpos()
+    j = w.robot.joint_names.index("Joint_Shoulder_Pitch_Left")
+    err = []
+    for k in range(60):  # raise the arm forward and close the left hand
+        qt = q.copy()
+        qt[7 + j] = q[7 + j] - 0.8 * min(1.0, (k + 1) / 30)
+        w.set_hand_command(grip_to_command(min(1.0, k / 20), 0.0))
+        w.step(qt, 0.02)
+        hp = w.hand_poses()
+        err += [np.linalg.norm(hp[i, :3] - w.data.xpos[w.hand_body[s]]) for i, s in enumerate(("left", "right"))]
+    assert max(err) < 0.01 and err[-1] < 1e-3  # free space: on the robot hand (mm while moving)
+    assert np.abs(w.hand_q - command_to_joint_pos(grip_to_command(1.0, 0.0))).max() < 0.02  # fingers reach the command
+    assert w.grasped == {"left": None, "right": None} and np.all(w.hand_force == 0)
+
+
+def test_physical_hand_stops_at_surfaces(cfg):
+    w = SimWorld(_bench_scene(), cfg)
+    down = _hand_quat(np.array([0, -1.0, 0]), np.array([0, 0, -1.0]), np.array([1.0, 0, 0]))  # palm down
+    other = (w.data.xpos[w.hand_body["right"]].copy(), w.data.xquat[w.hand_body["right"]].copy())
+    # the target pushes the palm (0.02 below the hand origin) 5 cm into the table top
+    _script_hands(w, lambda t: {"left": (np.array([0.8, 0.0, 0.75 + 0.02 + 0.10 - min(t, 1.0) * 0.15]), down),
+                                "right": other})
+    _run_world(w, 1.5)
+    palm_z = w.hand_poses()[0, 2] - 0.02
+    assert -0.005 < palm_z - 0.75 < 0.002  # on the surface, not in it
+    f = np.linalg.norm(w.overlay.reaction["left"][:3])
+    assert abs(f - cfg["hands"]["physics"]["max_force"]) < 1.0  # pressing with the force limit
+
+
+def test_grip_without_contact_grasps_nothing(cfg):
+    """The weld grasp picked up anything within 10 cm; physical fingers have to touch it."""
+    w = SimWorld(_bench_scene({"name": "cube", "shape": "box", "size": [0.05, 0.05, 0.05], "pos": [0.6, 0.0, 0.776],
+                               "dynamic": True, "mass": 0.1}), cfg)
+    down = _hand_quat(np.array([0, -1.0, 0]), np.array([0, 0, -1.0]), np.array([1.0, 0, 0]))
+    other = (w.data.xpos[w.hand_body["right"]].copy(), w.data.xquat[w.hand_body["right"]].copy())
+    hover = np.array([0.6 - 0.11, 0.0, 0.776 + 0.06 + 0.08])  # the pinch point 8 cm above the cube
+    _script_hands(w, lambda t: {"left": (hover + [0, 0, max(0.0, t - 1.5) * 0.15], down), "right": other})
+    log = []
+    events = _run_world(w, 2.5, grips=lambda t: (min(1.0, t), 0.0), log=log)
+    assert events == [] and w.grasped["left"] is None
+    assert np.abs(log[-1] - log[0]).max() < 1e-3  # the cube stayed on the table
+
+
+def _pinch(w, obj, lift=0.15, open_at=None):
+    c0 = w.data.xpos[w.info.body[obj]].copy()
+    down = _hand_quat(np.array([0, -1.0, 0]), np.array([0, 0, -1.0]), np.array([1.0, 0, 0]))
+    other = (w.data.xpos[w.hand_body["right"]].copy(), w.data.xquat[w.hand_body["right"]].copy())
+    grasp = c0 + np.array([-0.11, 0.02, 0.06])  # hand origin with the pinch point on the object
+    _script_hands(w, lambda t: {"left": (grasp + [0, 0, 0.1 * max(0.0, 1 - t / 0.8) + lift * np.clip(t - 2.2, 0, 1)],
+                                         down), "right": other})
+    grips = (lambda t: (np.clip(t - 1.0, 0, 1) * (t < open_at if open_at else 1), 0.0))
+    return c0, grips
+
+
+def test_pinch_lifts_a_cube_and_lets_it_go(cfg):
+    w = SimWorld(_bench_scene({"name": "cube", "shape": "box", "size": [0.05, 0.05, 0.05], "pos": [0.6, 0.0, 0.776],
+                               "dynamic": True, "mass": 0.1}), cfg)
+    c0, grips = _pinch(w, "cube", open_at=4.0)
+    log = []
+    events = _run_world(w, 4.0, grips, log)
+    assert log[-1][0][2] - c0[2] > 0.12  # lifted with the hand (0.15)
+    assert ("left", "grasp", "cube") in events and w.grasped["left"] == "cube" and w.hand_force[0] > 2.0
+    events = _run_world(w, 1.0, lambda t: (0.0, 0.0), log)  # open the hand: it falls back on the table
+    assert ("left", "release", "cube") in events and w.grasped["left"] is None
+    assert abs(log[-1][0][2] - c0[2]) < 0.01
+
+
+def test_two_hands_lift_a_box(cfg):
+    box = {"name": "box", "shape": "box", "size": [0.22, 0.30, 0.18], "pos": [0.7, 0.0, 0.84], "dynamic": True,
+           "mass": 1.5}
+    w = SimWorld(_bench_scene(box), cfg)
+    c0 = w.data.xpos[w.info.body["box"]].copy()
+    q = _hand_quat(np.array([0, 0, 1.0]), np.array([0, -1.0, 0]), np.array([1.0, 0, 0]))  # palms facing, thumbs up
+
+    def poses(t):
+        off = 0.15 + 0.02 + 0.05 - np.clip(t / 0.6, 0, 1) * 0.07  # palms from 5 cm outside to 2 cm into the sides
+        base = c0 + [-0.09, 0, 0.2 * np.clip(t - 1.0, 0, 1)]
+        return {"left": (base + [0, off, 0], q), "right": (base - [0, off, 0], q)}
+
+    _script_hands(w, poses)
+    log = []
+    events = _run_world(w, 2.5, log=log)
+    assert log[-1][0][2] - c0[2] > 0.18  # lifted 0.2 by squeezing it between the palms
+    assert {("left", "grasp", "box"), ("right", "grasp", "box")} <= set(events)
+    assert all(abs(f - 60.0) < 15 for f in w.hand_force)  # each palm presses ~ kp * 2 cm
 
 
 # -- protocol ------------------------------------------------------------------------------
@@ -234,6 +377,19 @@ def test_udp_session_roundtrip(cfg):
         client.sendto(protocol.encode({"v": 1, "type": "cmd", "cmd": "hello"}), addr)
         frames, _ = sim_frames("body_2trk", PROGRAM[:2])
         replies = []
+        last = None
+
+        def drain():  # read as we go: hundreds of states would overflow the client's receive buffer
+            nonlocal last
+            client.setblocking(False)
+            while True:
+                try:
+                    m = protocol.decode(client.recvfrom(65507)[0])
+                except (BlockingIOError, ConnectionResetError):
+                    break
+                replies.append(m["type"])
+                last = m if m["type"] == "state" else last
+
         for k, fr in enumerate(frames):
             client.sendto(protocol.encode(protocol.tracking_from_frame(fr)), addr)
             if k % 3 == 0:  # ~24 Hz ticks are plenty here
@@ -244,19 +400,13 @@ def test_udp_session_roundtrip(cfg):
                     hub.send(s.command(msg), a)
                 s.tick()
                 hub.broadcast(s.state_message())
-        last = None
-        client.setblocking(False)
-        while True:
-            try:
-                m = protocol.decode(client.recvfrom(65507)[0])
-            except (BlockingIOError, ConnectionResetError):
-                break
-            replies.append(m["type"])
-            last = m if m["type"] == "state" else last
+                drain()
+        drain()
         assert "scene" in replies and last is not None
         assert last["status"] == "running" and last["profile"] == "body_2trk"
         # robot qpos (38) + the finger overlay joints (22), as listed by the scene message's joint_names
-        assert len(last["robot"]["qpos"]) == 7 + len(s.world.joint_names_ext()) == 60 and len(last["objects"]["pos"]) == 1
+        assert len(last["robot"]["qpos"]) == 7 + len(s.world.joint_names_ext()) + 14 == 74
+        assert len(last["objects"]["pos"]) == 1
     finally:
         client.close()
         hub.close()
@@ -314,19 +464,22 @@ def test_grips_close_the_fingers_and_are_recorded(cfg, tmp_path):
     w = s.world
     g = s.latest.buttons["left_grip"]  # the newest frame is the one the last tick used
     assert g > 0.95 and np.allclose(w.hand_cmd, grip_to_command(g, 0.0, s.grip_full))
-    # the overlay finger joints carry the command and sit on the hand
-    li = w.overlay.qposadr[3]  # l_3_joint_index_middle
-    assert abs(w.data.qpos[li] - s.grip_full * g * np.pi / 2) < 1e-9 and np.all(w.data.qpos[w.overlay.qposadr[11:]] == 0)
-    root = w.overlay.root["left"]
-    assert np.allclose(w.data.xpos[root], w.data.xpos[w.hand_body["left"]])
+    # the finger servos follow the command (nothing in the hand) and the hands sit on the robot hands
+    assert abs(w.hand_target[3] - s.grip_full * g * np.pi / 2) < 1e-9 and np.all(w.hand_target[11:] == 0)
+    assert abs(w.hand_q[3] - w.hand_target[3]) < 0.05 and np.abs(w.hand_q[11:]).max() < 0.01
+    assert np.linalg.norm(w.hand_poses()[0, :3] - w.data.xpos[w.hand_body["left"]]) < 0.01
     st = s.state_message()
-    assert len(st["robot"]["qpos"]) == 7 + len(s.scene_message()["joint_names"]) == 60
+    assert len(st["robot"]["qpos"]) == 7 + len(s.scene_message()["joint_names"]) + 14 == 74
+    assert st["grasp_mode"] == "physics" and len(st["hand_force"]) == 2
     assert st["hand_cmd"][6:] == [round(s.grip_full * g, 3)] * 6 and st["hand_cmd"][:6] == [0.0] * 6
     s.set_recording(False)
     ep = Episode.load(s.saved[0])
     cmd = ep["sim/hand/cmd"]
     assert cmd.shape[1] == 12 and cmd[-1, 6] > 0.5 and cmd[0, 6] < 0.1 and np.all(cmd[:, :6] == 0)
     assert ep["sim/hand/joint_pos"].shape[1] == 22 and json.loads(ep.group_attrs["sim"]["hand_motor_ids"]) == list(MOTOR_IDS)
+    assert ep["sim/hand/joint_target"].shape == ep["sim/hand/joint_pos"].shape
+    assert ep["sim/hand/pose"].shape[1:] == (2, 7) and ep["sim/hand/force"].shape[1] == 2
+    assert ep.group_attrs["sim"]["grasp_mode"] == "physics"
     # offline: the grips in raw/buttons become the hand channel of the motion exports
     stage_correct(s.saved[0])
     series, static = hand_series(Episode.load(s.saved[0]))
@@ -334,9 +487,12 @@ def test_grips_close_the_fingers_and_are_recorded(cfg, tmp_path):
     assert list(static["hand_motor_ids"]) == list(MOTOR_IDS)
 
 
-def test_hands_can_be_disabled(cfg):
+def test_hands_can_be_disabled(cfg, weld_cfg):
     w = SimWorld(load_scene("empty"), {**cfg, "hands": {"enabled": False}})
     assert w.overlay is None and len(w.qpos_ext()) == 38 and len(w.joint_names_ext()) == 31
+    assert w.grasp_mode == "weld"  # holding by contact needs the physical hands
+    w = SimWorld(load_scene("empty"), weld_cfg)  # weld grasp: visual finger overlays
+    assert not w.physical and len(w.qpos_ext()) == 60
 
 
 def test_locomotion_moves_and_turns_about_the_robot(cfg):

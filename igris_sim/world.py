@@ -9,16 +9,26 @@ Robot modes (configs/sim.yaml physics.mode):
              igris_pipeline.sim.mujoco_eval.pd_replay. Contacts, joint limits and torque limits are
              physical; the harness force says how much external help the motion needs.
 
-Hands (configs/sim.yaml hands.enabled): the controller grips also close articulated finger overlays
-(igris_sim/hand_model.py) through the Robros hand command (igris_pipeline/hands.py). They are visual
-only; holding an object is the grasp below.
+Hands (configs/sim.yaml hands.enabled): the controller grips also close articulated fingers
+(igris_sim/hand_model.py) through the Robros hand command (igris_pipeline/hands.py).
 
-Grasping: pressing a controller grip attaches the nearest graspable object whose surface is within
-grasp.radius of that palm; releasing the grip lets it go (with its current velocity, so it can be
-thrown). In harness mode the attachment is a MuJoCo weld constraint between hand and object; in
-kinematic mode the robot does not respond to forces, so a weld would be solved mostly on the
-(overwritten) hand side and the object would lag: the object is carried kinematically instead,
-its pose set from the hand pose before every physics step.
+Grasping (configs/sim.yaml grasp.mode):
+  physics  the hands are physical (hand_model.PhysicalHands): a free rigid palm + fingers pulled onto
+           the robot hand by a force-limited spring (it stops at surfaces instead of entering them),
+           finger motors servo to the command and stop on contact. Objects are held only by contact
+           forces and friction: they must be squeezed (between fingers and thumb or palm, or between
+           both hands) or carried on the hand. grasped[side] / the grasp events report an object
+           this hand presses with >= grasp.hold_force while it is held (opposing hand contacts, or
+           no other support); it is released after the hand force stays below grasp.release_force
+           for grasp.release_time_s. In harness mode the spring's reaction loads the robot's arm.
+  weld     pressing a controller grip attaches the nearest graspable object whose surface is within
+           grasp.radius of that palm, touching or not; releasing the grip lets it go (with its
+           current velocity, so it can be thrown). In harness mode the attachment is a MuJoCo weld
+           constraint between hand and object; in kinematic mode the robot does not respond to
+           forces, so a weld would be solved mostly on the (overwritten) hand side and the object
+           would lag: the object is carried kinematically instead, its pose set from the hand pose
+           before every physics step. The fingers are visual overlays. Used when the hands are
+           disabled.
 """
 from __future__ import annotations
 
@@ -32,18 +42,30 @@ from igris_pipeline.utils.rotations import quat_conj, quat_mul, quat_normalize, 
 
 from igris_pipeline.hands import HAND_COMMAND_DIM, HAND_JOINT_NAMES, command_to_joint_pos
 
-from .hand_model import HandOverlay
+from .hand_model import HandOverlay, PhysicalHands, physics_params, pose_rate
 from .scene import HANDS, Scene, build_model
+
+SIDES = ("left", "right")
 
 
 class SimWorld:
     def __init__(self, scene: Scene, sim_cfg: dict, mode: str | None = None):
         self.scene = scene
         self.cfg = sim_cfg
-        self.hands_enabled = bool(sim_cfg.get("hands", {}).get("enabled", False))
-        self.model, self.info = build_model(scene, hands=self.hands_enabled)
+        hc = sim_cfg.get("hands", {})
+        g = sim_cfg.get("grasp", {})
+        self.hands_enabled = bool(hc.get("enabled", False))
+        self.grasp_mode = str(g.get("mode", "physics"))
+        if self.grasp_mode not in ("physics", "weld"):
+            raise ValueError(f"unknown grasp mode {self.grasp_mode!r}")
+        if not self.hands_enabled:
+            self.grasp_mode = "weld"  # holding by contact needs the physical hands
+        self.hand_params = physics_params(hc.get("physics")) if self.grasp_mode == "physics" else None
+        self.model, self.info = build_model(scene, hands=self.hands_enabled, hand_physics=self.hand_params)
         m = self.model
         ph = sim_cfg.get("physics", {})
+        m.opt.timestep = float(ph.get("timestep", m.opt.timestep))
+        m.opt.impratio = float(ph.get("impratio", m.opt.impratio))
         m.opt.iterations = int(ph.get("solver_iterations", m.opt.iterations))
         m.opt.noslip_iterations = int(ph.get("noslip_iterations", m.opt.noslip_iterations))
         self.robot = IgrisModel(model=m)
@@ -68,11 +90,19 @@ class SimWorld:
             self.h_kp, self.h_kd = float(hc.get("kp", 3000.0)), float(hc.get("kd", 300.0))
         self.palm = {s: r.gid(f"{b}_collision") for s, b in HANDS.items()}
         self.hand_body = {s: r.bid(b) for s, b in HANDS.items()}
-        self.overlay = HandOverlay(m, self.hand_body, HANDS) if self.hands_enabled else None
-        g = sim_cfg.get("grasp", {})
+        self.overlay = None
+        if self.hand_params is not None:
+            self.overlay = PhysicalHands(m, self.hand_body, HANDS, self.hand_params)
+        elif self.hands_enabled:
+            self.overlay = HandOverlay(m, self.hand_body, HANDS)
+        self.physical = self.hand_params is not None
+        self._kin = mujoco.MjData(m)  # scratch: robot hand poses of the interpolated targets
         self.grasp_radius = float(g.get("radius", 0.10))
         self.grip_on, self.grip_off = float(g.get("grip_on", 0.6)), float(g.get("grip_off", 0.4))
+        self.hold_force, self.release_force = float(g.get("hold_force", 1.0)), float(g.get("release_force", 0.3))
+        self.release_time = float(g.get("release_time_s", 0.1))
         self.dynamic = [n for n in self.info.objects if self.info.dynamic[n]]
+        self.body_object = {self.info.body[n]: n for n in self.info.graspable}
         self.dofadr = {n: int(m.jnt_dofadr[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, f"obj_{n}_free")])
                        for n in self.dynamic}
         self.harness_force = 0.0
@@ -92,14 +122,23 @@ class SimWorld:
     def reset(self, q_robot: np.ndarray | None = None):
         m, d = self.model, self.data
         mujoco.mj_resetData(m, d)
-        d.eq_active[:] = 0
+        d.eq_active[:] = m.eq_active0  # grasp welds off, finger couplings on
         self.hand_cmd = np.zeros(HAND_COMMAND_DIM)
+        self.hand_target = np.zeros(len(HAND_JOINT_NAMES))
         self.hand_q = np.zeros(len(HAND_JOINT_NAMES))
+        self.hand_force = np.zeros(2)  # physical hands: contact normal force on objects (N), left / right
+        self.contacts = {}             # physical hands: PhysicalHands.contacts() of the last step
         self.grasped = {s: None for s in HANDS}
         self._carried = {}  # kinematic mode: side -> (object, pos in hand frame, quat in hand frame, last pose)
+        self._weak = {s: 0.0 for s in HANDS}  # physics: time the held object has been pressed too weakly
+        self._events = []
         q = self.spawn_qpos() if q_robot is None else np.asarray(q_robot, float)
         d.qpos[:self.nq_r] = q
         mujoco.mj_forward(m, d)
+        if self.physical:
+            self.overlay.place(d, {s: (d.xpos[b].copy(), d.xquat[b].copy()) for s, b in self.hand_body.items()})
+            self.overlay.set_targets(d, self.hand_target)
+            mujoco.mj_forward(m, d)
         self._update_hands()
         self._q_prev = q.copy()
 
@@ -108,23 +147,37 @@ class SimWorld:
 
     # -- hands ----------------------------------------------------------------------------
     def set_hand_command(self, cmd) -> None:
-        """Normalized Robros hand command (12, motor order); drives the finger overlays."""
+        """Normalized Robros hand command (12, motor order); drives the fingers."""
         self.hand_cmd = np.clip(np.asarray(cmd, float), 0.0, 1.0)
-        self.hand_q = command_to_joint_pos(self.hand_cmd)
+        self.hand_target = command_to_joint_pos(self.hand_cmd)
+        if self.physical:
+            self.overlay.set_targets(self.data, self.hand_target)  # finger angles follow from the physics
+        else:
+            self.hand_q = self.hand_target
 
     def _update_hands(self):
-        if self.overlay is not None:
+        if self.physical:
+            self.hand_q = self.overlay.joint_pos(self.data)
+        elif self.overlay is not None:
             self.overlay.apply(self.data, self.hand_q)
             mujoco.mj_kinematics(self.model, self.data)
 
     def joint_names_ext(self) -> list[str]:
-        """Names of qpos_ext()[7:]: the robot joints, then the finger joints when hands are enabled."""
+        """Names of qpos_ext()[7:7 + n]: the robot joints, then the finger joints when hands are enabled."""
         return list(self.robot.joint_names) + (list(HAND_JOINT_NAMES) if self.overlay is not None else [])
 
+    def hand_poses(self) -> np.ndarray:
+        """Physical hands: (2, 7) world pose [pos, quat wxyz] of the left / right hand root."""
+        return self.overlay.poses(self.data)
+
     def qpos_ext(self) -> np.ndarray:
-        """Robot qpos with the finger angles appended (what the app draws, robot_export layout)."""
+        """What the app draws (robot_export layout): robot qpos, the finger angles when hands are
+        enabled, and with physical hands their root poses (left, right; 7 each)."""
         q = self.robot_qpos()
-        return np.concatenate([q, self.hand_q]) if self.overlay is not None else q
+        if self.overlay is None:
+            return q
+        parts = [q, self.hand_q] + ([self.hand_poses().ravel()] if self.physical else [])
+        return np.concatenate(parts)
 
     def object_poses(self, names=None):
         names = self.dynamic if names is None else names
@@ -152,6 +205,8 @@ class SimWorld:
                 d.qpos[:self.nq_r] = q_prev_sub
                 d.qvel[:self.nv_r] = v_ref
                 self._carry(h)
+                if self.physical:
+                    self.overlay.drive(m, d, self._hand_targets(q_prev_sub, q_sub, h))
                 mujoco.mj_step(m, d)
                 d.qpos[:self.nq_r] = q_sub
                 d.qvel[:self.nv_r] = v_ref
@@ -164,6 +219,11 @@ class SimWorld:
                 tq = (self.h_kp * 0.1) * _quat_err(q_sub[3:7], d.qpos[3:7]) + (self.h_kd * 0.1) * (w_ref - w)
                 d.xfrc_applied[self.base, :3] = f
                 d.xfrc_applied[self.base, 3:] = tq
+                if self.physical:  # the hands follow the simulated robot hands, which feel the reaction
+                    q_next = d.qpos.copy()
+                    mujoco.mj_integratePos(m, q_next, d.qvel, h)
+                    self.overlay.drive(m, d, self._hand_targets(d.qpos[:self.nq_r], q_next[:self.nq_r], h))
+                    self._hand_reactions()
                 mujoco.mj_step(m, d)
                 forces.append(float(np.linalg.norm(f)))
             q_prev_sub = q_sub
@@ -172,8 +232,30 @@ class SimWorld:
             mujoco.mj_kinematics(m, d)
         else:
             self.harness_force = float(np.mean(forces)) / (self.mass * 9.81) * 100.0  # % body weight
-        self._update_hands()  # overlays on the final hand pose (they carry no contacts, so once a tick is enough)
+        self._update_hands()  # visual overlays on the final hand pose (no contacts: once a tick is enough)
+        if self.physical:
+            self._contact_grasp(n * h)
         self._q_prev = q1.copy()
+
+    def _hand_poses_at(self, q_robot):
+        kd = self._kin
+        kd.qpos[:self.nq_r] = q_robot
+        mujoco.mj_kinematics(self.model, kd)
+        return {s: (kd.xpos[b].copy(), kd.xquat[b].copy()) for s, b in self.hand_body.items()}
+
+    def _hand_targets(self, q0, q1, h):
+        """Physical hands' targets for a step from robot pose q0 to q1: the robot hand at q1 and its velocity."""
+        a, b = self._hand_poses_at(q0), self._hand_poses_at(q1)
+        return {s: (*b[s], *pose_rate(*a[s], *b[s], h)) for s in a}
+
+    def _hand_reactions(self):
+        """Harness mode: the spring that pulls a physical hand pulls its robot hand the other way."""
+        d = self.data
+        for s, b in self.hand_body.items():
+            w = self.overlay.reaction[s]
+            f, tq = -w[:3], -w[3:]  # at the robot hand origin; xfrc_applied acts at its centre of mass
+            d.xfrc_applied[b, :3] = f
+            d.xfrc_applied[b, 3:] = tq - np.cross(d.xipos[b] - d.xpos[b], f)
 
     def _full(self, q_robot):
         q = self.data.qpos.copy()
@@ -188,7 +270,13 @@ class SimWorld:
 
     # -- grasping -------------------------------------------------------------------------
     def update_grasp(self, grips: dict) -> list[tuple[str, str, str]]:
-        """Grip values per side (0..1) -> events [(side, "grasp"|"release", object)]."""
+        """Grip values per side (0..1) -> events [(side, "grasp"|"release", object)].
+
+        Physics mode: the grips only close the fingers (set_hand_command); the events are the
+        contact grasps detected by step() since the last call."""
+        if self.physical:
+            events, self._events = self._events, []
+            return events
         events = []
         for side, value in grips.items():
             held = self.grasped.get(side)
@@ -203,6 +291,44 @@ class SimWorld:
                     self.grasped[side] = obj
                     events.append((side, "grasp", obj))
         return events
+
+    def _contact_grasp(self, dt):
+        """Physics mode: grasped / released objects from the hand contacts of the last step."""
+        self.contacts = cs = self.overlay.contacts(self.model, self.data, self.body_object)
+        force = {s: {} for s in SIDES}
+        for obj, e in cs.items():
+            for s, f, _ in e["hand"]:
+                force[s][obj] = force[s].get(obj, 0.0) + f
+        self.hand_force = np.array([sum(force[s].values()) for s in SIDES])
+        for side in SIDES:
+            held = self.grasped[side]
+            if held is not None:
+                if force[side].get(held, 0.0) >= self.release_force:
+                    self._weak[side] = 0.0
+                    continue
+                self._weak[side] += dt
+                if self._weak[side] >= self.release_time:
+                    self.grasped[side], self._weak[side] = None, 0.0
+                    self._events.append((side, "release", held))
+                continue
+            if force[side]:
+                obj = max(force[side], key=force[side].get)
+                if force[side][obj] >= self.hold_force and self.is_held(cs[obj]):
+                    self.grasped[side] = obj
+                    self._events.append((side, "grasp", obj))
+        del self._events[:-20]  # not collected while calibrating
+
+    def is_held(self, contact: dict) -> bool:
+        """An object is held when the hands squeeze it (opposing contact normals, from one or both
+        hands) or carry it (nothing else supports it)."""
+        hand = [(f, n) for _, f, n in contact["hand"] if f > 0.0]
+        total = sum(f for f, _ in hand)
+        if total < self.hold_force:
+            return False
+        if contact["other"] < 1e-3:
+            return True
+        resultant = np.linalg.norm(sum(f * n for f, n in hand))
+        return resultant < 0.8 * total
 
     def nearest_graspable(self, side) -> str | None:
         m, d = self.model, self.data
