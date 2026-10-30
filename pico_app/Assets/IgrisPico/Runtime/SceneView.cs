@@ -50,6 +50,7 @@ namespace IgrisPico
                 for (int k = 0; k < o.Parts.Count; k++)
                 {
                     ScenePart p = o.Parts[k];
+                    if (p.Rgba.Length > 3 && p.Rgba[3] <= 0.001) continue;  // collider only (e.g. scanned walls)
                     GameObject go = null;
                     if (p.Shape == "mesh")
                     {

@@ -1,0 +1,35 @@
+# Depth-camera scan -> simulation scene (igris_scan, scripts/scan_build.py, docs/scan_pipeline.md).
+# Every key can be overridden on the command line (scan_build.py --set section.key=value).
+
+split_s: null               # s: end of the scan phase (static scene); later frames = interaction phase
+camera: track               # scan phase: track (handheld) | static (tripod) | poses (poses.txt)
+interaction_camera: track   # track | static (tripod: keeps the last scan pose)
+scan_step: 1                # every n-th frame of the scan phase (2 at 30 fps is plenty for slow sweeps)
+
+scan:                       # igris_scan/reconstruct.py ScanParams
+  voxel: 0.008              # m: TSDF voxel; 0.005 for small objects close up, 0.01-0.02 for rooms
+  depth_max: 3.5            # m: farther depth is noise (stereo error grows with d^2)
+  keyframe_distance: 0.12
+  keyframe_angle: 0.17
+
+align:                      # igris_scan/align.py AlignParams
+  support_height: null      # m: true height of the main table (scale correction / no floor in view)
+  yaw_offset_deg: 0.0
+  origin_offset: [0.0, 0.0] # m: spawn offset from below the first camera
+  manhattan_snap_deg: 45.0
+
+segment:                    # igris_scan/segment.py SegmentParams
+  support_min_area: 0.3     # m^2: smaller horizontal surfaces belong to objects
+  max_object_size: 0.8      # m
+  max_object_height: 1.0    # m
+  min_object_points: 60
+
+changes:                    # igris_scan/changes.py ChangeParams
+  gone_fraction: 0.6
+  min_gone_s: 0.3
+  final_s: 1.0
+
+export:                     # igris_scan/export.py ExportParams
+  dynamic: interacted       # interacted | all | none: objects that become free bodies
+  object_density: 250.0     # kg/m^3 of the hull volume
+  max_triangles: 300000

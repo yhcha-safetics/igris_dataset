@@ -9,7 +9,8 @@ PICO 4 / PICO 4 Ultra VR 헤드셋 + 모션 트래커로 사람 동작을 수집
 [2]   자동 라벨링          ─ 이동(loco) / 하체(lower) / 상체(upper) 3축 라벨 + 검수 도구 ─> labels/*
 [3]   IGRIS-C 리타겟팅     ─ mink 2단계 IK (Robros GMR 테이블 기반) + 균형/접지 ─> motions/*.npz|pkl|csv
 [4]   평가                 ─ MuJoCo 물리 타당성 / Isaac Lab 모션 트래킹 RL / MuJoCo sim2sim
-[5]   시뮬레이션 텔레오퍼레이션 ─ 실시간 보정·리타게팅 + MuJoCo 가상 환경(물체 잡기) + 녹화 ─> data/<session>/raw/*.h5
+[5]   시뮬레이션 텔레오퍼레이션 ─ 실시간 보정·리타게팅 + MuJoCo 가상 환경(접촉 기반 물리 그립) + 녹화 ─> data/<session>/raw/*.h5
+[6]   depth 카메라 → 가상 환경 ─ 추적·TSDF 재구성, 바닥·방향 보정, 배경/물체 분할, 상호작용 물체 감지 ─> scenes/<name>/
 ```
 
 ## 0. 설치
@@ -410,20 +411,32 @@ PICO (XRoboToolkit 또는 PICO 앱) ─UDP─> 스트리밍 보정 ─> 스트�
 - **물리** (`configs/sim.yaml`의 `physics.mode`):
   - `kinematic`: 로봇이 사람을 그대로 따라가고 물체만 시뮬레이션합니다. 벽은 통과합니다.
   - `harness`: 관절 PD와 가상 하네스로 로봇도 물리 시뮬레이션합니다.
-- **상호작용**: 그립을 누르면 손바닥 10 cm 안의 물체를 잡습니다. 놓으면 그때의 속도로 떨어지거나 날아갑니다.
+- **상호작용 (물리 그립, `configs/sim.yaml`의 `grasp.mode: physics`)**: 물체는 손에 실제로 닿아 생긴 접촉력과 마찰로만 잡힙니다.
+  - 손은 물리 강체(손바닥 상자 + 손가락 캡슐)입니다. 로봇 손목을 힘 제한 스프링(3000 N/m, 최대 120 N)으로 따라가므로,
+    책상이나 상자에 닿으면 파고들지 않고 표면에서 멈춰 그 힘으로 누릅니다.
+  - 손가락은 Robros 손처럼 모터 6개(엄지 굽힘·검지·중지·약지·소지·엄지 회전)가 위치 서보(토크 제한 0.6 N·m)로 움직이고,
+    끝마디는 링크처럼 가운데 마디에 묶여 있습니다. 물체에 닿으면 멈춰 그 자리에서 쥡니다.
+  - 그래서 물체를 손가락과 엄지 사이(핀치)나 손바닥 사이(양손으로 상자 들기)에 끼워 눌러야 들립니다.
+    닿지 않은 물체는 그립을 쥐어도 따라오지 않습니다. 엄지는 그립 0.6 명령에서 검지·중지 끝과 만나도록 맞췄습니다.
+  - `grasp` 상태와 이벤트는 손이 1 N 이상 누르면서 물체가 "쥐어진" 경우(마주 보는 접촉, 또는 다른 받침 없이 손에 얹힘)에 생깁니다.
+  - 이전 방식(그립을 누르면 손바닥 10 cm 안의 물체가 붙음)은 `grasp.mode: weld`로 쓸 수 있습니다.
+  - 합성 시험(`tests/test_sim.py`): 5 cm 큐브 핀치로 들기, 1.5 kg 상자 양손 들기, 2 kg 크레이트 0.4 m 들기,
+    닿지 않은 큐브는 움직이지 않음, 책상을 누르면 표면에서 멈춤. 공처럼 둥근 물체는 핀치하면 굴러 빠질 수 있습니다(실제와 같음).
 - **손가락(그립 동작)**: 컨트롤러 그립(아날로그)을 쥔 만큼 로봇 손가락이 오므라듭니다(MuJoCo 뷰어와 PICO 앱 모두).
   손 명령은 Robros 손 형식(정규화 12개, 모터 11–16/21–26, 그립 × 0.6, `igris_pipeline/hands.py`)이라 실제 IGRIS-C 손 제어에 그대로 쓸 수 있습니다.
   손가락 모델은 원래 손 메시 크기에 맞춘 간략 모델이며(`igris_sim/hand_model.py`), 관절 이름은 Robros와 같습니다.
-  `configs/sim.yaml`의 `hands`에서 끄거나 그립 최대 명령을 바꿉니다.
+  `configs/sim.yaml`의 `hands`에서 끄거나 그립 최대 명령, 손 스프링·모터 세기를 바꿉니다.
 - **이동**: 왼쪽 스틱으로 이동, 오른쪽 스틱으로 회전합니다. 실제로 걸은 동작에 더해집니다.
 - **녹화**: A로 시작·정지합니다. `raw/*`는 `02_record.py`와 같은 형식이라 `run_pipeline.py`로 다시 처리할 수 있습니다.
   `sim/*`에는 로봇 상태, 물체 포즈, 잡기 상태, 이동 오프셋, 손 명령(`sim/hand/cmd`)과 손가락 각도가 담깁니다.
+  물리 그립에서는 손가락 목표 각도(`sim/hand/joint_target`), 손 자세(`sim/hand/pose`), 손이 물체를 누른 힘(`sim/hand/force`)도 기록됩니다.
   `run_pipeline.py`로 다시 처리하면 `motions/*.npz|pkl`에 `hand_cmd`(T,12), `hand_joint_pos`(T,22), `hand_grip`(T,2)이
   모션과 같은 시간축으로 들어갑니다(Isaac 로더는 이 키를 무시).
 - **가상 환경**: `scenes/<name>/scene.json`(Unity와 같은 파일). 기본 맵은 세 가지입니다.
   - `empty`: 빈 바닥, 거리 표시, 공
   - `tabletop`: 책상, 집을 물건 4개, 쟁반, 바닥의 통
   - `room`: 6 × 6 m 방, 작업대, 선반, 의자, 상자, 문
+  - depth 카메라로 촬영한 실제 공간: 6장(`scripts/scan_build.py`)
 
 ```powershell
 .venv\Scripts\python scripts\sim_server.py --source xrt --scene tabletop --viewer                # XRoboToolkit 스트림 + 데스크톱 뷰어
@@ -443,7 +456,7 @@ PICO (XRoboToolkit 또는 PICO 앱) ─UDP─> 스트리밍 보정 ─> 스트�
 | sparse_trackers | 6.4 ms | 9.6 / 18.1 ms | 2.8 cm |
 | hmd_3pt | 5.2 ms | 8.3 / 15.2 ms | 7.3 cm |
 
-물리 계산은 프레임당 약 1 ms입니다.
+물리 계산은 프레임당 약 2–3 ms입니다(물리 손, 2 ms 스텝).
 실시간 보정은 인과 필터 때문에 20–45 ms 늦고, 정확도는 오프라인 처리보다 낮습니다. 녹화 데이터는 오프라인으로 다시 처리하세요.
 
 **PICO 4 Ultra 앱** ([pico_app/](pico_app/README.md), Unity 2022.3 + PICO SDK 3.4)
@@ -454,11 +467,38 @@ PICO (XRoboToolkit 또는 PICO 앱) ─UDP─> 스트리밍 보정 ─> 스트�
 - Unity가 필요 없는 부분(프로토콜, 좌표 변환, FK, 씬·메시 해석)은 `tests/test_app.py`가 C# 컴파일러로 검증합니다.
 - 빌드 방법은 [pico_app/README.md](pico_app/README.md)에 있습니다.
 
-**다음 단계**
-- 씬 빌더(RealSense D435/D435i, 일반 카메라)
-  - 실제 공간을 촬영해 재구성(TSDF / 사진측량)합니다.
-  - 바닥 정렬과 스케일을 보정하고 물체를 분리합니다.
-  - 충돌용 볼록 분해를 거쳐 `scenes/<name>/scene.json`과 메시로 내보냅니다.
+## 6. depth 카메라 촬영 → 가상 환경 (`igris_scan/`)
+
+실제 공간을 depth 카메라로 찍어 5장의 시뮬레이션 씬(`scenes/<name>/`)을 만듭니다. 자세한 내용은 [docs/scan_pipeline.md](docs/scan_pipeline.md)에 있습니다.
+
+```
+촬영(RGB-D) ─> 카메라 추적 + TSDF 재구성 ─> 보정(중력·바닥·방향·원점·스케일) ─> 분할(바닥/책상/벽/구조물/물체)
+            └─ 상호작용 구간: 모델에 정합만 ─> 옮겨진 물체 감지 + 최종 위치 ─────────────────┘─> scene.json + 메시
+```
+
+- **촬영**: 먼저 아무것도 건드리지 않고 카메라를 천천히(0.5 m/s 이하) 움직여 공간을 훑습니다(스캔 구간).
+  이어서 카메라를 내려놓거나 든 채로 물건을 옮깁니다(상호작용 구간). 두 구간의 경계 시각을 `--split`으로 줍니다.
+- **배경과 상호작용한 물건 구분**:
+  - 바닥·책상 윗면·벽은 평면으로, 나머지는 덩어리로 나눕니다. 받침 위에 놓인 0.8 m 이하의 덩어리가 물체이고, 나머지는 배경 구조물입니다.
+  - 상호작용 구간의 프레임마다 각 물체 표면을 투영해 봅니다. 물체가 있던 자리 너머(배경)가 보이면 "사라짐"으로 칩니다.
+    손이나 사람이 앞을 가린 경우는 증거로 쓰지 않습니다. 0.3초 이상 사라진 물체가 상호작용한 물체입니다.
+  - 상호작용한 물체만 MuJoCo 자유 강체(질량 = 볼록 껍질 부피 × 밀도)로 내보내고, 나머지는 고정합니다(`--dynamic all`로 모두 움직이게 할 수 있음).
+    마지막 1초의 장면에서 새로 생긴 덩어리를 크기·색으로 맞춰 물체가 놓인 최종 위치도 리포트에 남깁니다.
+- **결과물**: `scene.json`, 배경 메시(vertex color, 앱에서 색으로 표시), 물체 메시와 충돌용 볼록 껍질,
+  `scan_report.json`(보정값, 표면, 물체, 상호작용 증거), `preview.png`(위에서 본 분할 결과).
+
+```powershell
+.venv\Scripts\python scripts\scan_capture.py data\scans\lab01 --seconds 60                 # RealSense 촬영 (D4xx)
+.venv\Scripts\python scripts\scan_capture.py data\scans\lab01 --bag rec.bag                # realsense-viewer 녹화 변환
+.venv\Scripts\python scripts\scan_build.py data\scans\lab01 --name lab01 --split 25         # 스캔 25초 + 상호작용
+.venv\Scripts\python scripts\scan_build.py --synthetic data\scans\demo --name scan_demo      # 카메라 없이 합성 데모
+.venv\Scripts\python scripts\sim_server.py --scene lab01 --viewer                             # 만든 씬에서 텔레오퍼레이션
+```
+
+**합성 촬영 검증** (MuJoCo로 렌더링한 RGB-D, 깊이 노이즈 σ = 1.5 mm × d², `tests/test_scan.py`)
+- 카메라 추적 오차 ≤ 1.7 cm(스캔), 사람이 보이는 상호작용 구간 ≤ 1.9 cm, 바닥 평면 잔차 2 mm, 책상 높이 ±1.5 cm
+- 물체 4개 모두 검출(위치 ±5 cm 이내, 높이 ±2 cm 이내), 옮긴 물체 1개만 상호작용으로 판정, 이동 거리 ±6 cm 이내
+- 640×480·복셀 6 mm에서 물체 크기 오차는 대부분 2 cm 이내입니다. TSDF가 옆면을 부풀리므로 윗면이 평평한 물체는 윗면으로 크기를 잽니다.
 
 ## 데이터 포맷
 
@@ -490,4 +530,7 @@ data/<session>/manifest.json
   - 접촉 검출 임계값.
 - `hmd_3pt`의 하체는 추정값입니다. 하체 동작 데이터가 필요하면 트래커 2개 이상을 권장합니다.
 - 손가락(H5_C 6 DOF/손)은 아직 리타겟하지 않습니다. 핸드트래킹 26관절은 `--hands`로 기록만 됩니다.
+- 물리 손은 간략 모델(Robros 손 치수 근사)입니다. 실제 손의 마찰·유연성·모터 토크를 측정하면 `configs/sim.yaml`의 `hands.physics`를 맞추세요.
+- 스캔 파이프라인은 합성 촬영으로만 검증했습니다. 실제 카메라에서는 반사·투명 물체(유리, 금속)의 depth가 비고,
+  물체 질량은 부피로 추정하므로 `scene.json`에서 고쳐야 할 수 있습니다.
 - 합성 보행 데이터는 발이 미끄러지므로, 보행 구간 하네스 수치는 실측 데이터로 다시 봐야 합니다.
